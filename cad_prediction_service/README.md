@@ -10,24 +10,23 @@ A minimal FastAPI service that receives recent user actions from a 3D CAD editor
 POST /predict
      │
      ▼
-PredictorAdapter  ◄──── config in main.py (MODEL_PROVIDER)
+_get_predictor(provider, model)
      │
-     ├── MockPredictor       – deterministic fake output, no LLM needed
-     └── OllamaPredictor     – calls local Ollama via HTTP
+     ├── MockPredictor        – deterministic fake output, no LLM needed
+     ├── OllamaPredictor      – calls local Ollama via HTTP
+     ├── (OpenAIPredictor)    – future
+     └── (AnthropicPredictor) – future
           │
           ▼
      validate against PredictResponse schema
           │
           ├── valid   → return response
-          └── invalid → return safe fallback
+          └── invalid → return safe fallback (never crashes)
 ```
 
-Switching providers requires changing **two lines** at the top of `app/main.py`:
-
-```python
-MODEL_PROVIDER = "ollama"       # "mock" | "ollama"
-OLLAMA_MODEL   = "deepseek-r1:7b"
-```
+Adding a new provider requires only:
+1. Creating a new file in `app/predictor/` extending `PredictorAdapter`
+2. Adding one branch in `_get_predictor()` in `main.py`
 
 ---
 
@@ -36,16 +35,15 @@ OLLAMA_MODEL   = "deepseek-r1:7b"
 ### 1. Create and activate the virtual environment
 
 ```bash
-# From the repo root (EditorAI/)
+# 1. From the repo root (EditorAI/) to create the venv if it doesn't exist
 python -m venv venv
 
-# Windows
+# 2a. Windows cmd (terminal)
 venv\Scripts\activate
-#If using bash:
+# 2b. Windows bash
 source venv/Scripts/activate
 
-
-# macOS / Linux
+# 2c. macOS / Linux
 source venv/bin/activate
 ```
 
@@ -62,21 +60,230 @@ pip install -r requirements.txt
 
 ```bash
 # From cad_prediction_service/
-# Change the port to whatever in case of conflict
 uvicorn app.main:app --reload --port 8001
 ```
 
-The API will be available at `http://localhost:8001`.  
+API: `http://localhost:8001`  
 Interactive docs: `http://localhost:8001/docs`
 
 ---
 
-## Example request
+## Example requests
+
+### Mock predictor (no LLM)
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:8001/predict \
   -H "Content-Type: application/json" \
   -d '{
+    "editor_context": {
+      "mode": "modeling",
+      "current_tool": "move",
+      "selection": { "count": 1, "types": ["tube"] }
+    },
+    "recent_actions": [
+      { "label": "create_tube",         "params": { "radius": 20, "length": 500 } },
+      { "label": "duplicate_selection", "params": { "count": 1 } },
+      { "label": "move_object",         "params": { "axis": "x", "delta": 120 } }
+    ],
+    "options": { "top_k": 10, "provider": "claude", "include_full_answer": true, "include_prompt": true }
+  }'
+```
+
+### Ollama predictor
+
+```bash
+curl -X POST http://localhost:8001/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "editor_context": {
+      "mode": "modeling",
+      "current_tool": "move",
+      "selection": { "count": 1, "types": ["tube"] }
+    },
+    "recent_actions": [
+      { "label": "create_tube",         "params": { "radius": 20, "length": 500 } },
+      { "label": "duplicate_selection", "params": { "count": 1 } },
+      { "label": "move_object",         "params": { "axis": "x", "delta": 120 } }
+    ],
+    "options": {
+      "top_k": 3,
+      "provider": "ollama",
+      "model": "deepseek-r1:7b",
+      "include_full_answer": false, 
+      "include_prompt": true
+    }
+  }'
+```
+
+---
+
+## Request fields reference
+
+### `options`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `top_k` | int | 3 | Number of predictions to return, ordered by score descending. |
+| `provider` | string\|null | null | Backend to use: `"ollama"`, `"claude"`, or null/omitted for mock. Future: `"openai"`. |
+| `model` | string\|null | null | Model name passed to the provider (e.g. `"deepseek-r1:7b"`). Required when provider is not mock. |
+| `include_full_answer` | bool | false | If true, the response includes the full raw LLM output in `llm_raw_response`. Useful for debugging prompt quality. |
+| `include_prompt` | bool | false | If true, the response includes the full LLM prompt in `llm_prompt`. Useful for debugging prompt quality. |
+---
+
+## Response fields reference
+
+### `task_summary`
+
+High-level interpretation of what the user is currently doing.
+
+| Field | Description |
+|---|---|
+| `label` | Short snake_case identifier for the detected task (e.g. `"building_parallel_tubes"`). |
+| `description` | Human-readable sentence describing the inferred task. |
+
+### `context_update`
+
+Updated state to be stored and passed back as `previous_context` in the next request, allowing the model to track user intent across calls.
+
+| Field | Description |
+|---|---|
+| `current_goal` | Inferred high-level goal of the user. |
+| `active_object_types` | List of object types currently being worked on. |
+| `pattern_detected` | Detected interaction pattern if any (e.g. `"linear_repetition"`), or null. |
+
+### `predictions`
+
+List of predicted next actions, sorted by `score` descending. Length equals `options.top_k`.
+
+| Field | Description |
+|---|---|
+| `label` | Action identifier. Must be one of the labels defined in `prompts.py:ALLOWED_ACTIONS`. |
+| `params` | Suggested parameters for the action. Schema is action-specific and open-ended. |
+| `score` | Confidence score between 0.0 and 1.0. Higher means the model considers it more likely. Not calibrated — treat as a relative ranking, not a probability. |
+
+### `meta`
+
+Traceability fields, useful for logging and debugging.
+
+| Field | Description |
+|---|---|
+| `model` | Name of the model that produced the response (e.g. `"deepseek-r1:7b"`), or `"mock"`. |
+| `provider` | Backend that was used: `"ollama"`, `"mock"`, or a future provider name. |
+| `prompt_version` | Version tag of the prompt template used (defined in `prompts.py`). Increment when the prompt changes significantly, so responses can be traced back to the exact prompt that produced them. |
+
+### `llm_raw_response`
+
+Only present when `options.include_full_answer` is `true`. Contains the full unprocessed text returned by the LLM before JSON extraction — including any `<think>` blocks, preamble, or extra commentary the model may have emitted.
+
+---
+
+## Prompt authoring and source of truth
+
+**The prompt templates in `app/prompts.py` are not the source of truth.**
+
+The **Aleska Editor** project contains `AgentPromptDesign.md`, a Markdown file that documents the agent system. Among its sections, it includes the exact prompt instruction text — the same lines that are manually copied into the Python string constants in `app/prompts.py`. That file is the source of truth.
+
+### Normal workflow
+
+1. A change is made in Aleska Editor (new command, corrected payload field, new semantic type, etc.).
+2. If the change affects the prompt, the Aleska Editor documentation file is updated first.
+3. The new prompt text is then **manually copied verbatim into `app/prompts.py`** here.
+
+### If you edit `prompts.py` directly
+
+Sometimes a prompt issue is found and fixed here first (e.g. a formatting bug, a confusing instruction). **In that case you must also update the Aleska Editor documentation file** — otherwise the next copy-paste from that project will overwrite your fix, because the source was never updated.
+
+> In short: the Aleska Editor Markdown doc and `prompts.py` must always contain the same text. If they differ, the Aleska Editor doc wins.
+
+---
+
+## Project structure
+
+```
+cad_prediction_service/
+├── app/
+│   ├── main.py               # FastAPI app, predictor dispatch, logging middleware
+│   ├── schemas.py            # Pydantic request/response models
+│   ├── prompts.py            # Prompt builders + ALLOWED_ACTIONS vocabulary
+│   ├── predictor/
+│   │   ├── base.py               # Abstract PredictorAdapter
+│   │   ├── mock_predictor.py     # Deterministic fake predictor
+│   │   ├── ollama_predictor.py   # Ollama HTTP adapter
+│   │   └── claude_predictor.py  # Anthropic Claude adapter
+│   └── utils/
+│       ├── json_utils.py     # JSON extraction, validation, safe fallbacks
+│       └── logging_utils.py  # Shared logger (file + console)
+├── logs/
+│   └── service.log           # Written at runtime; created automatically
+└── requirements.txt
+```
+
+---
+
+## Logging
+
+All modules use the shared logger from `app/utils/logging_utils`:
+
+```python
+from app.utils.logging_utils import log
+
+log.info("something happened")
+log.error("something went wrong: %s", exc)
+```
+
+**Do not use `print()`.** The logger writes to two sinks simultaneously:
+- **Console (stdout)** — INFO and above, same output you see from uvicorn
+- **`logs/service.log`** — DEBUG and above, full detail including complete LLM raw output on parse failures
+
+The `logs/` directory is created automatically on first run. Every request is logged with its body, response status, and elapsed time. On errors, the full raw LLM output is written to the file (not truncated).
+
+---
+
+## JSON extraction
+
+Models mirror the formatting of examples they see in the prompt. If the output example in the prompt is wrapped in a markdown code fence, the model will wrap its response the same way — even if the prompt also says "no fences". Both prompts (`QUERY_PROMPT_TEMPLATE` and `QUERY_DESIGN_PREFIX`) show their output examples as plain JSON for exactly this reason.
+
+`extract_json` in `json_utils.py` still handles stray fences as a safety net, locating the object before parsing it:
+
+1. **Try `json.loads()` directly** — succeeds when the model returns clean JSON.
+2. **Balanced-brace scan** — walks the text character by character, tracking brace depth and string/escape state, to find the exact start and end of the first top-level `{...}`. The extracted substring is then passed to `json.loads()`.
+
+The actual parsing is always done by the stdlib `json.loads()`, which is strict — malformed JSON is an error, not silently repaired. A repair library (e.g. `json-repair`) was deliberately not used: if the model returns broken JSON we want to know about it, not paper over it.
+
+---
+
+## Providers
+
+Current providers:
+
+**Mock**: 
+- Returns a fixed set of predictions.
+- Predictor literal: `mock`
+
+**Ollama**: 
+- Calls a locally running Ollama instance via HTTP. Ollama must be running and the model must be available.
+- Predictor literal: `ollama`
+- Models:
+  - `deepseek-r1:7b`
+  - `qwen2.5`
+
+**Claude**
+- Calls the Anthropic Claude API. Requires an API key in the .env file. (like `ANTHROPIC_API_KEY=sk-ant-api03-...etc...`)
+- Predictor literal: `claude`
+- Models: `claude-haiku-4-5`, claude-sonnet-4-6, 
+
+## Adding a new provider
+
+1. Create `app/predictor/my_provider_predictor.py` extending `PredictorAdapter`
+2. Implement `predict(payload: dict) -> dict | None`
+3. Add a branch in `_get_predictor()` in `main.py`
+
+## More examples
+
+Claude example (requires API key in .env)
+```json
+{
     "editor_context": {
       "mode": "modeling",
       "current_tool": "move",
@@ -90,33 +297,12 @@ curl -X POST http://localhost:8000/predict \
       { "label": "duplicate_selection", "params": { "count": 1 } },
       { "label": "move_object",         "params": { "axis": "x", "delta": 120 } }
     ],
-    "options": { "top_k": 3 }
-  }'
+    "options": {
+      "top_k": 3,
+      "provider": "claude",
+      "include_full_answer": true,
+      "include_prompt": true
+    }
+  }
 ```
 
----
-
-## Project structure
-
-```
-cad_prediction_service/
-├── app/
-│   ├── main.py               # FastAPI app + config
-│   ├── schemas.py            # Pydantic request/response models
-│   ├── prompts.py            # Prompt builder + allowed action labels
-│   ├── predictor/
-│   │   ├── base.py           # Abstract PredictorAdapter
-│   │   ├── mock_predictor.py # Deterministic fake predictor
-│   │   └── ollama_predictor.py  # Ollama HTTP adapter
-│   └── utils/
-│       └── json_utils.py     # JSON extraction, validation, fallback
-└── requirements.txt
-```
-
----
-
-## Adding a new provider
-
-1. Create `app/predictor/my_provider_predictor.py` extending `PredictorAdapter`
-2. Implement `predict(payload) -> dict | None`
-3. Add a branch in `_load_predictor()` in `main.py`

@@ -27,6 +27,14 @@ class Action(BaseModel):
 
 class Options(BaseModel):
     top_k: int = 3
+    #: Backend provider to use. None or "mock" → MockPredictor. "ollama" → OllamaPredictor.
+    provider: Optional[str] = None
+    #: Model name passed to the provider (e.g. "deepseek-r1:7b" for ollama).
+    model: Optional[str] = None
+    #: Include the full raw LLM response text in the reply (useful for debugging).
+    include_full_answer: bool = False
+    #: Include the prompt that was sent to the LLM in the reply (useful for prompt tuning).
+    include_prompt: bool = False
 
 
 class PredictRequest(BaseModel):
@@ -66,3 +74,34 @@ class PredictResponse(BaseModel):
     context_update: ContextUpdate
     predictions: list[PredictedAction]
     meta: Meta
+    #: Raw LLM output — only populated when options.include_full_answer is True.
+    llm_raw_response: Optional[str] = None
+    #: Prompt sent to the LLM — only populated when options.include_prompt is True.
+    llm_prompt: Optional[str] = None
+
+
+# ── /query endpoint models ──────────────────────────────────────────────────
+
+class QueryRequest(BaseModel):
+    #: Arbitrary JSON payload forwarded verbatim into the prompt.
+    payload: dict[str, Any]
+    options: Options = Options()
+
+
+class QueryResponse(BaseModel):
+    todo: list[Any] = []
+    commands: list[Any] = []
+    reasoning: Optional[str] = None
+    #: Raw LLM output — only populated when options.include_full_answer is True.
+    llm_raw_response: Optional[str] = None
+    #: Prompt sent to the LLM — only populated when options.include_prompt is True.
+    llm_prompt: Optional[str] = None
+
+
+# ── /query-design endpoint models ──────────────────────────────────────────
+
+class QueryDesignResponse(QueryResponse):
+    """Extended response for /query-design — includes design analysis fields."""
+    desiredCommands: list[Any] = []
+    designFeedback: list[Any] = []
+    notes: Optional[str] = None

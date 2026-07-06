@@ -13,3 +13,19 @@ class PredictorAdapter(ABC):
     @abstractmethod
     def predict(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError
+
+    @abstractmethod
+    def query(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Send the query prompt (built from payload) to the LLM and return the parsed response.
+
+        Returns None on any error so the caller can fall back gracefully.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def query_design(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Send the query-design prompt to the LLM and return the parsed response.
+
+        Same as query() but uses the design-analysis prefix. Returns None on error.
+        """
+        raise NotImplementedError

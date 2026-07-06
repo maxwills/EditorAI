@@ -16,6 +16,22 @@ _MOCK_PREDICTIONS = [
 class MockPredictor(PredictorAdapter):
     """Deterministic predictor for testing without a running LLM."""
 
+    def query(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "todo": [{"id": 1, "description": "Mock query — no LLM used.", "status": "done"}],
+            "commands": [],
+            "reasoning": "Mock predictor active.",
+        }
+
+    def query_design(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "todo": [{"id": 1, "description": "Mock query-design — no LLM used.", "status": "done"}],
+            "commands": [],
+            "reasoning": "Mock predictor active.",
+            "desiredCommands": [],
+            "designFeedback": [],
+        }
+
     def predict(self, payload: dict[str, Any]) -> dict[str, Any]:
         top_k: int = payload.get("options", {}).get("top_k", 3)
         return {

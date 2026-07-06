@@ -1,6 +1,7 @@
 from typing import Any
 
-import httpx
+from anthropic import Anthropic, APIError
+from dotenv import load_dotenv
 
 from app.predictor.base import PredictorAdapter
 from app.prompts import PROMPT_VERSION, QUERY_DESIGN_PROMPT_VERSION, QUERY_PROMPT_VERSION, build_prompt, build_query_design_prompt, build_query_prompt
@@ -8,16 +9,24 @@ from app.schemas import PredictRequest
 from app.utils.json_utils import extract_json
 from app.utils.logging_utils import log
 
-#: Ollama local API endpoint. Change if Ollama runs on a different host/port.
-OLLAMA_URL = "http://localhost:11434/api/generate"
+load_dotenv()
+
+# Available Claude models.
+CLAUDE_HAIKU = "claude-haiku-4-5"
+CLAUDE_SONNET = "claude-sonnet-4-5"
+CLAUDE_OPUS = "claude-opus-4-5"
+
+#: Default model used for Claude predictions.
+CLAUDE_MODEL = CLAUDE_HAIKU
 
 
-class OllamaPredictor(PredictorAdapter):
-    """Calls a locally running Ollama instance to generate predictions."""
+class ClaudePredictor(PredictorAdapter):
+    """Calls the Anthropic Claude API to generate predictions."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str = CLAUDE_MODEL) -> None:
         self.model = model
-        self.provider = "ollama"
+        self.provider = "claude"
+        self.client = Anthropic()  # reads ANTHROPIC_API_KEY from env
 
     def predict(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         request = PredictRequest(**payload)
@@ -26,22 +35,21 @@ class OllamaPredictor(PredictorAdapter):
         prompt = build_prompt(request, self.model, self.provider, top_k)
 
         try:
-            response = httpx.post(
-                OLLAMA_URL,
-                json={"model": self.model, "prompt": prompt, "stream": False},
-                timeout=60.0,
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
             )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            log.error("[OllamaPredictor] predict HTTP error: %s", exc)
+        except APIError as exc:
+            log.error("[ClaudePredictor] predict API error: %s", exc)
             return None
 
-        raw_text: str = response.json().get("response", "")
-        log.debug("[OllamaPredictor.predict] LLM raw:\n%s", raw_text)
+        raw_text: str = message.content[0].text if message.content else ""
+        log.debug("[ClaudePredictor.predict] LLM raw:\n%s", raw_text)
         parsed = extract_json(raw_text)
 
         if parsed is None:
-            log.error("[OllamaPredictor] predict: could not extract JSON. Full raw output:\n%s", raw_text)
+            log.error("[ClaudePredictor] predict: could not extract JSON. Full raw output:\n%s", raw_text)
             return {"_error": f"JSON parse failed. Raw output: {raw_text}", "llm_raw_response": raw_text, "llm_prompt": prompt}
 
         parsed.setdefault("meta", {})
@@ -60,22 +68,21 @@ class OllamaPredictor(PredictorAdapter):
         prompt = build_query_prompt(payload)
 
         try:
-            response = httpx.post(
-                OLLAMA_URL,
-                json={"model": self.model, "prompt": prompt, "stream": False},
-                timeout=120.0,
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
             )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            log.error("[OllamaPredictor] query HTTP error: %s", exc)
+        except APIError as exc:
+            log.error("[ClaudePredictor] query API error: %s", exc)
             return None
 
-        raw_text: str = response.json().get("response", "")
-        log.debug("[OllamaPredictor.query] LLM raw:\n%s", raw_text)
+        raw_text: str = message.content[0].text if message.content else ""
+        log.debug("[ClaudePredictor.query] LLM raw:\n%s", raw_text)
         parsed = extract_json(raw_text)
 
         if parsed is None:
-            log.error("[OllamaPredictor] query: could not extract JSON. Full raw output:\n%s", raw_text)
+            log.error("[ClaudePredictor] query: could not extract JSON. Full raw output:\n%s", raw_text)
             return {"_error": f"JSON parse failed. Raw output: {raw_text}", "llm_raw_response": raw_text, "llm_prompt": prompt}
 
         parsed["llm_raw_response"] = raw_text
@@ -88,22 +95,21 @@ class OllamaPredictor(PredictorAdapter):
         prompt = build_query_design_prompt(payload)
 
         try:
-            response = httpx.post(
-                OLLAMA_URL,
-                json={"model": self.model, "prompt": prompt, "stream": False},
-                timeout=120.0,
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
             )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            log.error("[OllamaPredictor] query_design HTTP error: %s", exc)
+        except APIError as exc:
+            log.error("[ClaudePredictor] query_design API error: %s", exc)
             return None
 
-        raw_text: str = response.json().get("response", "")
-        log.debug("[OllamaPredictor.query_design] LLM raw:\n%s", raw_text)
+        raw_text: str = message.content[0].text if message.content else ""
+        log.debug("[ClaudePredictor.query_design] LLM raw:\n%s", raw_text)
         parsed = extract_json(raw_text)
 
         if parsed is None:
-            log.error("[OllamaPredictor] query_design: could not extract JSON. Full raw output:\n%s", raw_text)
+            log.error("[ClaudePredictor] query_design: could not extract JSON. Full raw output:\n%s", raw_text)
             return {"_error": f"JSON parse failed. Raw output: {raw_text}", "llm_raw_response": raw_text, "llm_prompt": prompt}
 
         parsed["llm_raw_response"] = raw_text

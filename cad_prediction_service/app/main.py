@@ -213,7 +213,7 @@ def predict(request: PredictRequest) -> PredictResponse:
 async def query(
     payload: str = Form(..., description="Task payload as a JSON string."),
     options: str = Form("{}", description="Options as a JSON string (provider, model, etc.)."),
-    file: Annotated[UploadFile | None, File(description="Optional file to attach (image, PDF, Excel, DXF, etc.).")] = None,
+    files: Annotated[list[UploadFile], File(description="Optional files to attach (image, PDF, Excel, DXF, etc.).")] = [],
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
     parsed_payload = _parse_form_json("payload", payload)
@@ -221,7 +221,7 @@ async def query(
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
-    attachments = [RawAttachment(filename=file.filename, data=await file.read())] if file else None
+    attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
     raw = predictor.query(request.payload, attachments, system_prefix=system_prefix)
 
     if raw is not None:
@@ -241,7 +241,7 @@ async def query(
 async def query_design(
     payload: str = Form(..., description="Task payload as a JSON string."),
     options: str = Form("{}", description="Options as a JSON string (provider, model, etc.)."),
-    file: Annotated[UploadFile | None, File(description="Optional file to attach (image, PDF, Excel, DXF, etc.).")] = None,
+    files: Annotated[list[UploadFile], File(description="Optional files to attach (image, PDF, Excel, DXF, etc.).")] = [],
 ) -> QueryDesignResponse:
     """Design-analysis endpoint.
 
@@ -253,7 +253,7 @@ async def query_design(
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
-    attachments = [RawAttachment(filename=file.filename, data=await file.read())] if file else None
+    attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
     raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix)
 
     if raw is not None:

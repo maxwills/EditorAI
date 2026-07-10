@@ -267,15 +267,16 @@ Both endpoints use `multipart/form-data`. Files are sent as raw binary — no ba
 |---|---|---|
 | `payload` | yes | JSON string — the task payload (same structure as before) |
 | `options` | no | JSON string — provider, model, debug flags. Defaults to `{}`. |
-| `file` | no | A single file. The server detects the type from the filename extension. |
+| `files` | no | One or more files. Repeat the field for each file. The server detects the type from the filename extension. |
 
-**curl example:**
+**curl example (multiple files):**
 
 ```bash
 curl -X POST http://localhost:8001/query \
   -F 'payload={"taskContext": {"userText": "how many tubes are here?"}}' \
   -F 'options={"provider": "claude"}' \
-  -F 'file=@screenshot.png'
+  -F 'files=@screenshot.png' \
+  -F 'files=@reference.pdf'
 ```
 
 **JavaScript (webapp) example:**
@@ -284,13 +285,14 @@ curl -X POST http://localhost:8001/query \
 const form = new FormData();
 form.append('payload', JSON.stringify(payload));
 form.append('options', JSON.stringify({ provider: 'claude' }));
-form.append('file', selectedFile);   // File object from <input type="file">
+form.append('files', selectedFile);          // single File object
+// form.append('files', anotherFile);        // add more files by repeating the field
 fetch('/query', { method: 'POST', body: form });
 ```
 
 No encoding step is needed — `FormData` sends the raw file bytes directly, and the browser sets the correct `Content-Type: multipart/form-data` header automatically.
 
-> **Note:** the API currently accepts one file per request. If multiple attachments are needed in the future, the `file` field can be changed back to `list[UploadFile]`, though Swagger UI does not render multi-file arrays with a direct file-picker button.
+> **Swagger UI note:** Swagger does not render multi-file arrays with a native file-picker button — use curl or the JavaScript example above to test multi-file requests.
 
 ### Type detection (server-side)
 
@@ -360,10 +362,11 @@ The `logs/` directory is created automatically on first run. Every request is lo
 
 Models mirror the formatting of examples they see in the prompt. If the output example in the prompt is wrapped in a markdown code fence, the model will wrap its response the same way — even if the prompt also says "no fences". Both prompts (`QUERY_PROMPT_TEMPLATE` and `QUERY_DESIGN_PREFIX`) show their output examples as plain JSON for exactly this reason.
 
-`extract_json` in `json_utils.py` still handles stray fences as a safety net, locating the object before parsing it:
+`extract_json` in `json_utils.py` handles stray fences and common LLM formatting quirks through three passes:
 
 1. **Try `json.loads()` directly** — succeeds when the model returns clean JSON.
-2. **Balanced-brace scan** — walks the text character by character, tracking brace depth and string/escape state, to find the exact start and end of the first top-level `{...}`. The extracted substring is then passed to `json.loads()`.
+2. **Balanced-brace scan** — walks the text character by character, tracking brace depth and string/escape state, to find the exact `{...}` object. Handles markdown fences and trailing prose.
+3. **Sanitize + re-scan** — replaces literal newlines/tabs inside string values with their `\n`/`\t` escape sequences, then reruns the brace scan. Handles models that emit multi-line string values without proper escaping.
 
 The actual parsing is always done by the stdlib `json.loads()`, which is strict — malformed JSON is an error, not silently repaired. A repair library (e.g. `json-repair`) was deliberately not used: if the model returns broken JSON we want to know about it, not paper over it.
 
@@ -389,7 +392,7 @@ Current providers:
 - Predictor literal: `claude`
 - Supports file attachments (images, PDFs, Excel, text-based CAD formats) — see [File attachments](#file-attachments).
 - Models: `claude-haiku-4-5` (default), `claude-sonnet-4-5`
-- **Developer override:** include the phrase `_DEV_MODE_ON_` anywhere in `userText` to bypass all CAD restrictions. The model will respond freely (useful for testing vision, reasoning, etc.). The response still arrives in the standard JSON envelope — look for it in the `reasoning` field. Detection happens in the predictor before the prompt is built, so the CAD system prompt is never sent to the model in this mode.
+- **Developer override:** include the phrase `_DEV_MODE_ON_` anywhere in the request payload (typically in `userText`) to unlock free-form mode. A prefix is prepended to the normal CAD system prompt instructing the model to also comply with any user request outside the CAD scope (useful for testing vision, reasoning, etc.). The full CAD prompt is still sent — normal CAD behaviour is preserved alongside the override. The response arrives in the standard JSON envelope; free-form answers appear in the `reasoning` field. Works with all providers, not just Claude.
 
 ## Adding a new provider
 

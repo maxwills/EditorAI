@@ -1,5 +1,20 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel
+
+ProviderName = Literal["mock", "ollama", "claude"]
+#: "default" is the placeholder for ollama until proper model naming is added.
+ModelName = Literal["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "default"]
+
+
+class Options(BaseModel):
+    top_k: int = 3
+    #: Backend provider to use. None → MockPredictor.
+    provider: Optional[ProviderName] = None
+    model: Optional[ModelName] = None
+    #: Include the full raw LLM response text in the reply (useful for debugging).
+    include_full_answer: bool = False
+    #: Include the prompt that was sent to the LLM in the reply (useful for prompt tuning).
+    include_prompt: bool = False
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
@@ -23,18 +38,6 @@ class PreviousContext(BaseModel):
 class Action(BaseModel):
     label: str
     params: dict[str, Any] = {}
-
-
-class Options(BaseModel):
-    top_k: int = 3
-    #: Backend provider to use. None or "mock" → MockPredictor. "ollama" → OllamaPredictor.
-    provider: Optional[str] = None
-    #: Model name passed to the provider (e.g. "deepseek-r1:7b" for ollama).
-    model: Optional[str] = None
-    #: Include the full raw LLM response text in the reply (useful for debugging).
-    include_full_answer: bool = False
-    #: Include the prompt that was sent to the LLM in the reply (useful for prompt tuning).
-    include_prompt: bool = False
 
 
 class PredictRequest(BaseModel):

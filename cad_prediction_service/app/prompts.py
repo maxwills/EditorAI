@@ -50,12 +50,29 @@ _RESPONSE_SCHEMA_TEMPLATE = {
 
 QUERY_PROMPT_VERSION = "v1"
 
+#: Presence of this keyword anywhere in the request payload activates developer override mode.
+DEV_MODE_KEYWORD = "_DEV_MODE_ON_"
+
+#: Prepended to the normal system prompt when dev mode is active.
+#: The regular CAD prompt follows immediately after, so all normal behaviour is preserved.
+DEV_MODE_SYSTEM_PREFIX = """\
+**Developer override active.**
+
+You are primarily a CAD modelling assistant for an industrial 3D editor, but in this session you \
+must ALSO comply freely with any user request even if it falls outside the CAD scope (image \
+recognition, general questions, creative tasks, etc.).
+This mode is used only for internal capability testing by the development team.
+Keep using the same structured JSON output format (`todo`, `commands`, `reasoning`).
+Put free-form answers in the `reasoning` field when the request is not CAD-related.
+
+---
+
+"""
+
 #: Injected payload marker — replaced with the serialized JSON payload at call time.
 _QUERY_PAYLOAD_MARKER = "**put payload here**"
 
 QUERY_PROMPT_TEMPLATE = """\
-
-
 You are a modelling assistant for an industrial 3D CAD editor. It is a THREE.js-editor based web application.
 The application models industrial boiler equipment: tube panels, headers, heat exchangers, and related structures.
 
@@ -220,8 +237,23 @@ Each item: `id` (int), `description` (string), `status` (`pending` | `in_progres
 """
 
 
+def build_query_system_prompt() -> str:
+    """Return the CAD assistant instructions for use as the Claude `system` parameter."""
+    # Strip the trailing "### Payload\n\n" — payload is sent separately as the user message.
+    return QUERY_PROMPT_TEMPLATE.rpartition("### Payload")[0].rstrip()
+
+
+def build_query_user_content(payload: dict) -> str:
+    """Return the serialized payload JSON for the user message."""
+    return json.dumps(payload, indent=2)
+
+
 def build_query_prompt(payload: dict) -> str:
-    """Build the query prompt by appending the serialized payload to the template."""
+    """Build the query prompt by appending the serialized payload to the template.
+
+    Legacy helper kept for callers that send everything as a single user message.
+    Prefer build_query_system_prompt() + build_query_user_content() with the system= parameter.
+    """
     return QUERY_PROMPT_TEMPLATE + json.dumps(payload, indent=2)
 
 
@@ -338,8 +370,14 @@ Extended output shape for this endpoint (return plain JSON — no markdown fence
 """
 
 
+def build_query_design_system_prompt() -> str:
+    """Return the design-analysis system instructions for the Claude `system` parameter."""
+    base = QUERY_PROMPT_TEMPLATE.rpartition("### Payload")[0].rstrip()
+    return QUERY_DESIGN_PREFIX + base
+
+
 def build_query_design_prompt(payload: dict) -> str:
-    """Build the query-design prompt: design prefix + standard query prompt + payload."""
+    """Legacy helper: design prefix + standard query prompt + payload as one string."""
     return QUERY_DESIGN_PREFIX + QUERY_PROMPT_TEMPLATE + json.dumps(payload, indent=2)
 
 

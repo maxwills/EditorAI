@@ -22,3 +22,8 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime / pid files
+*.pid
+.uvicorn.pid
+nul

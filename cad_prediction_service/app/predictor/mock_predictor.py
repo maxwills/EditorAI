@@ -16,14 +16,14 @@ _MOCK_PREDICTIONS = [
 class MockPredictor(PredictorAdapter):
     """Deterministic predictor for testing without a running LLM."""
 
-    def query(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def query(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any]:
         return {
             "todo": [{"id": 1, "description": "Mock query — no LLM used.", "status": "done"}],
             "commands": [],
             "reasoning": "Mock predictor active.",
         }
 
-    def query_design(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def query_design(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any]:
         return {
             "todo": [{"id": 1, "description": "Mock query-design — no LLM used.", "status": "done"}],
             "commands": [],

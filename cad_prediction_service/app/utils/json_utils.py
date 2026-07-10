@@ -5,6 +5,37 @@ from app.schemas import PredictResponse, QueryDesignResponse, QueryResponse
 from app.utils.logging_utils import log
 
 
+def _sanitize_json_strings(text: str) -> str:
+    """Escape literal newlines/tabs inside JSON string values.
+
+    LLMs occasionally emit multi-line string values with bare line breaks instead
+    of \\n escapes, producing invalid JSON. This pass fixes those characters while
+    leaving the structural JSON (braces, commas, etc.) untouched.
+    """
+    result: list[str] = []
+    in_string = False
+    escape_next = False
+    _escapes = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            result.append(ch)
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            result.append(ch)
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if in_string and ch in _escapes:
+            result.append(_escapes[ch])
+            continue
+        result.append(ch)
+    return "".join(result)
+
+
 def extract_json(text: str) -> Optional[dict[str, Any]]:
     """Extract the first JSON object from raw LLM output.
 
@@ -13,6 +44,8 @@ def extract_json(text: str) -> Optional[dict[str, Any]]:
       2. Balanced-brace scan — finds the first '{' and walks character-by-character
          tracking depth and string state. This correctly handles markdown fences,
          trailing text, and nested objects with '}' inside string values.
+      3. Same scan on a sanitized copy where literal newlines inside strings are
+         escaped — handles LLMs that emit multi-line string values without \\n.
     Returns None if no valid JSON object is found.
     """
     text = text.strip()
@@ -22,40 +55,50 @@ def extract_json(text: str) -> Optional[dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    # Balanced-brace scan — robust against greedy-regex false positives.
-    start = text.find("{")
-    if start == -1:
+    def _brace_scan(src: str) -> Optional[dict[str, Any]]:
+        start = src.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(src[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(src[start : i + 1])
+                    except json.JSONDecodeError as exc:
+                        log.debug("extract_json: brace-scan candidate failed: %s", exc)
+                        return None
         return None
 
-    depth = 0
-    in_string = False
-    escape_next = False
+    # Pass 2 — balanced-brace scan on original text.
+    result = _brace_scan(text)
+    if result is not None:
+        return result
 
-    for i, ch in enumerate(text[start:], start):
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == "\\" and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                candidate = text[start : i + 1]
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError as exc:
-                    log.debug("extract_json: balanced-brace candidate failed: %s", exc)
-                    return None
+    # Pass 3 — same scan after fixing literal newlines/tabs inside strings.
+    sanitized = _sanitize_json_strings(text)
+    if sanitized != text:
+        result = _brace_scan(sanitized)
+        if result is not None:
+            return result
 
-    log.debug("extract_json: no balanced JSON object found in %d-char text", len(text))
+    log.debug("extract_json: no valid JSON object found in %d-char text", len(text))
     return None
 
 

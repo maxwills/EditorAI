@@ -1,15 +1,18 @@
 import json
+import re
 import time
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.predictor.base import PredictorAdapter
 from app.predictor.claude_predictor import CLAUDE_MODEL, ClaudePredictor
 from app.predictor.mock_predictor import MockPredictor
 from app.predictor.ollama_predictor import OllamaPredictor
-from app.schemas import PredictRequest, PredictResponse, QueryDesignResponse, QueryRequest, QueryResponse
+from app.prompts import DEV_MODE_KEYWORD, DEV_MODE_SYSTEM_PREFIX
+from app.schemas import Options, PredictRequest, PredictResponse, QueryDesignResponse, QueryRequest, QueryResponse
+from app.utils.attachment_utils import RawAttachment
 from app.utils.json_utils import fallback_query_design_response, fallback_query_response, fallback_response, validate_query_design_response, validate_query_response, validate_response
 from app.utils.logging_utils import log
 
@@ -19,55 +22,103 @@ _mock = MockPredictor()
 
 
 # ── Logging middleware ──────────────────────────────────────────────────────────
+#: Pure ASGI middleware — avoids BaseHTTPMiddleware which deadlocks with async handlers.
 
-class _LoggingMiddleware(BaseHTTPMiddleware):
-    """Logs every request (body summary + timing) and its response status."""
+class _LoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next) -> Response:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         start = time.monotonic()
+        method: str = scope.get("method", "")
+        path: str = scope.get("path", "")
 
-        # Cache and preview request body (FastAPI re-reads from cache downstream).
-        body_bytes = await request.body()
-        try:
-            body_preview = _summarise(json.loads(body_bytes.decode("utf-8")))
-        except Exception:
-            body_preview = body_bytes.decode("utf-8", errors="replace")[:300]
+        # Capture request body chunks as they stream in.
+        req_chunks: list[bytes] = []
 
-        log.info("→ %s %s  %s", request.method, request.url.path, body_preview)
+        async def _receive() -> dict:
+            message = await receive()
+            if message["type"] == "http.request":
+                req_chunks.append(message.get("body", b""))
+            return message
 
-        response = await call_next(request)
-        status_code = response.status_code
+        # Capture response status + body chunks as they stream out.
+        status_code = 500
+        resp_chunks: list[bytes] = []
 
-        resp_bytes = b""
-        async for chunk in response.body_iterator:
-            resp_bytes += chunk
+        async def _send(message: dict) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            elif message["type"] == "http.response.body":
+                resp_chunks.append(message.get("body", b""))
+                if not message.get("more_body", False):
+                    _log_pair(method, path, status_code,
+                               b"".join(req_chunks), b"".join(resp_chunks),
+                               (time.monotonic() - start) * 1000)
+            await send(message)
 
-        elapsed_ms = (time.monotonic() - start) * 1000
-
-        try:
-            resp_preview = _summarise(json.loads(resp_bytes.decode("utf-8")))
-        except Exception:
-            resp_preview = resp_bytes.decode("utf-8", errors="replace")[:300]
-
-        level = log.error if status_code >= 400 else log.info
-        level("← %s %s  status=%d  elapsed=%.0fms  %s",
-              request.method, request.url.path, status_code, elapsed_ms, resp_preview)
-
-        return Response(
-            content=resp_bytes,
-            status_code=status_code,
-            headers=dict(response.headers),
-            media_type=response.media_type,
-        )
+        await self.app(scope, _receive, _send)
 
 
-def _summarise(obj: Any, max_chars: int = 300) -> str:
+def _summarise(obj: Any, max_chars: int = 3000) -> str:
     """Compact JSON summary of a dict/list, truncated to max_chars."""
     try:
         s = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     except Exception:
         s = str(obj)
     return s[:max_chars] + ("…" if len(s) > max_chars else "")
+
+
+def _extract_multipart_text(raw: str, max_field_chars: int = 2000) -> str:
+    """Extract text form-field values from a raw multipart/form-data body.
+
+    Skips binary fields (file uploads). Falls back to a plain truncation when
+    no named parts are found (e.g. non-multipart or malformed body).
+    """
+    parts = re.findall(r'name="([^"]+)"\r?\n\r?\n(.*?)(?=\r?\n--|$)', raw, re.DOTALL)
+    if not parts:
+        return raw[:max_field_chars]
+    lines = []
+    for name, value in parts:
+        if name == "file":
+            lines.append("file=<binary>")
+        else:
+            v = value.strip()
+            lines.append(f"{name}={v[:max_field_chars]}{'…' if len(v) > max_field_chars else ''}")
+    return "  ".join(lines)
+
+
+def _log_pair(method: str, path: str, status: int,
+              req_body: bytes, resp_body: bytes, elapsed_ms: float) -> None:
+    try:
+        req_preview = _summarise(json.loads(req_body.decode("utf-8")))
+    except Exception:
+        req_preview = _extract_multipart_text(req_body.decode("utf-8", errors="replace"))
+
+    try:
+        resp_preview = _summarise(json.loads(resp_body.decode("utf-8")))
+    except Exception:
+        resp_preview = resp_body.decode("utf-8", errors="replace")[:3000]
+
+    log.info("→ %s %s  %s", method, path, req_preview)
+    level = log.error if status >= 400 else log.info
+    level("← %s %s  status=%d  elapsed=%.0fms  %s", method, path, status, elapsed_ms, resp_preview)
+
+
+def _parse_form_json(field_name: str, value: str) -> Any:
+    """Parse a JSON string from a form field; raises HTTP 422 on invalid input."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{field_name}' must be a valid JSON string. {exc}",
+        )
 
 
 app.add_middleware(_LoggingMiddleware)
@@ -99,6 +150,27 @@ def _get_predictor(provider: str | None, model: str | None) -> tuple[PredictorAd
     #     return OpenAIPredictor(model=model or "gpt-4o"), model or "gpt-4o", "openai"
 
     return _mock, "mock", "mock"
+
+
+def _check_dev_mode(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return (system_prefix, cleaned_payload).
+
+    If DEV_MODE_KEYWORD is found anywhere in the serialized payload, returns
+    DEV_MODE_SYSTEM_PREFIX and a copy of the payload with the keyword stripped
+    from userText (wherever it lives). Otherwise returns ("", payload) unchanged.
+    """
+    if DEV_MODE_KEYWORD not in json.dumps(payload):
+        return "", payload
+
+    log.info("[dev] DEV_MODE_KEYWORD detected — activating developer override.")
+    # Strip keyword from userText; check taskContext first (GUI path), then root (bare payload).
+    tc = payload.get("taskContext") or {}
+    if DEV_MODE_KEYWORD in (tc.get("userText") or ""):
+        cleaned_tc = {**tc, "userText": tc["userText"].replace(DEV_MODE_KEYWORD, "").strip()}
+        payload = {**payload, "taskContext": cleaned_tc}
+    elif DEV_MODE_KEYWORD in (payload.get("userText") or ""):
+        payload = {**payload, "userText": payload["userText"].replace(DEV_MODE_KEYWORD, "").strip()}
+    return DEV_MODE_SYSTEM_PREFIX, payload
 
 
 def _pop_error(raw: dict[str, Any]) -> str | None:
@@ -138,11 +210,19 @@ def predict(request: PredictRequest) -> PredictResponse:
 
 
 @app.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest) -> QueryResponse:
+async def query(
+    payload: str = Form(..., description="Task payload as a JSON string."),
+    options: str = Form("{}", description="Options as a JSON string (provider, model, etc.)."),
+    file: Annotated[UploadFile | None, File(description="Optional file to attach (image, PDF, Excel, DXF, etc.).")] = None,
+) -> QueryResponse:
     """CAD modelling assistant endpoint."""
+    parsed_payload = _parse_form_json("payload", payload)
+    system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
+    request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
-    raw = predictor.query(request.payload)
+    attachments = [RawAttachment(filename=file.filename, data=await file.read())] if file else None
+    raw = predictor.query(request.payload, attachments, system_prefix=system_prefix)
 
     if raw is not None:
         error_detail = _pop_error(raw)
@@ -158,15 +238,23 @@ def query(request: QueryRequest) -> QueryResponse:
 
 
 @app.post("/query-design", response_model=QueryDesignResponse)
-def query_design(request: QueryRequest) -> QueryDesignResponse:
+async def query_design(
+    payload: str = Form(..., description="Task payload as a JSON string."),
+    options: str = Form("{}", description="Options as a JSON string (provider, model, etc.)."),
+    file: Annotated[UploadFile | None, File(description="Optional file to attach (image, PDF, Excel, DXF, etc.).")] = None,
+) -> QueryDesignResponse:
     """Design-analysis endpoint.
 
     Same prompt as /query but prefixed with design-analysis instructions.
     Commands are not dispatched; the LLM analyses gaps and produces desiredCommands / designFeedback.
     """
+    parsed_payload = _parse_form_json("payload", payload)
+    system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
+    request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
-    raw = predictor.query_design(request.payload)
+    attachments = [RawAttachment(filename=file.filename, data=await file.read())] if file else None
+    raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix)
 
     if raw is not None:
         error_detail = _pop_error(raw)

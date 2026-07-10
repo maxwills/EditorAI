@@ -56,8 +56,10 @@ class OllamaPredictor(PredictorAdapter):
 
         return parsed
 
-    def query(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        prompt = build_query_prompt(payload)
+    def query(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any] | None:
+        if attachments:
+            log.warning("[OllamaPredictor] attachments are not supported — %d file(s) ignored.", len(attachments))
+        prompt = system_prefix + build_query_prompt(payload)
 
         try:
             response = httpx.post(
@@ -84,8 +86,10 @@ class OllamaPredictor(PredictorAdapter):
 
         return parsed
 
-    def query_design(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        prompt = build_query_design_prompt(payload)
+    def query_design(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any] | None:
+        if attachments:
+            log.warning("[OllamaPredictor] attachments are not supported — %d file(s) ignored.", len(attachments))
+        prompt = system_prefix + build_query_design_prompt(payload)
 
         try:
             response = httpx.post(

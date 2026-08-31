@@ -18,6 +18,7 @@ from app.milestone_01_mock import (
     keyword_present,
     strip_keyword,
     tubes_to_commands,
+    world_fillet_radius,
 )
 
 SAMPLE_EMIT = {
@@ -43,6 +44,42 @@ SAMPLE_EMIT = {
             "filletRadius": 0,
             "autoFillet": False,
             "layer": "GHD-1",
+        },
+    ],
+}
+
+#: 2-pt straight + 3-pt 90 + 4-pt 180. R is plot mm; world fillet = R * 0.001.
+CURVE_EMIT = {
+    "unit": "plot",
+    "scale": "1:10",
+    "plotToWorld": 0.001,
+    "n": 3,
+    "tubes": [
+        {
+            "name": "s25_straight",
+            "points": [[2629.0, 2903.5], [2683.0, 2903.5]],
+            "D": 47.0,
+            "R": 0,
+            "filletRadius": 0,
+            "autoFillet": False,
+            "layer": "Symbols_25",
+        },
+        {
+            "name": "s25_90",
+            "points": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+            "D": 47.0,
+            "R": 47.0,
+            "autoFillet": False,
+            "layer": "Symbols_25",
+        },
+        {
+            "name": "s25_180",
+            "points": [[0.0, 0.0], [80.0, 0.0], [80.0, 94.0], [0.0, 94.0]],
+            "D": 47.0,
+            "R": 47.0,
+            "filletRadius": 0.047,
+            "autoFillet": False,
+            "layer": "Symbols_25",
         },
     ],
 }
@@ -114,6 +151,73 @@ def test_tubes_map_to_scene_create_swept_pipe_plot_units():
     assert all(c["command"] != "scene.createTube" for c in cmds)
 
 
+def test_two_pt_fillet_stays_zero_even_if_r_set():
+    tube = {
+        "name": "straight",
+        "points": [[0.0, 0.0], [50.0, 0.0]],
+        "D": 47.0,
+        "R": 47.0,
+        "filletRadius": 0.047,
+    }
+    assert world_fillet_radius(tube, 2, 0.001) == 0.0
+    cmds = tubes_to_commands({"plotToWorld": 0.001, "tubes": [tube]})
+    assert cmds[0]["params"]["filletRadius"] == 0
+    assert cmds[0]["params"]["autoFillet"] is False
+
+
+def test_three_pt_r_converts_plot_mm_to_world_metres():
+    tube = CURVE_EMIT["tubes"][1]
+    assert len(tube["points"]) == 3
+    assert tube["R"] == 47.0
+    assert "filletRadius" not in tube
+    cmds = tubes_to_commands({"plotToWorld": 0.001, "tubes": [tube]})
+    fr = cmds[0]["params"]["filletRadius"]
+    assert fr != 0
+    assert fr == pytest.approx(47.0 * 0.001)
+    assert cmds[0]["params"]["autoFillet"] is False
+    assert cmds[0]["params"]["diameter"] == 47.0
+    assert cmds[0]["params"]["points"] == tube["points"]
+    assert cmds[0]["command"] == "scene.createSweptPipe"
+
+
+def test_four_pt_uses_emit_fillet_radius_when_already_world():
+    tube = CURVE_EMIT["tubes"][2]
+    assert len(tube["points"]) == 4
+    cmds = tubes_to_commands({"plotToWorld": 0.001, "tubes": [tube]})
+    assert cmds[0]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert cmds[0]["params"]["autoFillet"] is False
+    assert cmds[0]["params"]["id"] == "s25_180"
+
+
+def test_three_pt_zero_placeholder_fillet_falls_back_to_r():
+    #: Emit schema always has filletRadius; 0 means unset, R is the plot-mm bend.
+    tube = {
+        "name": "s25_90",
+        "points": [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]],
+        "D": 47.0,
+        "R": 47.0,
+        "filletRadius": 0,
+        "autoFillet": False,
+    }
+    cmds = tubes_to_commands({"plotToWorld": 0.001, "tubes": [tube]})
+    assert cmds[0]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert cmds[0]["params"]["filletRadius"] != 0
+
+
+def test_three_pt_does_not_invent_r_when_missing():
+    tube = {"name": "no_r", "points": [[0, 0], [10, 0], [10, 10]], "D": 47.0}
+    assert world_fillet_radius(tube, 3, 0.001) == 0.0
+
+
+def test_mixed_emit_maps_one_command_per_tube():
+    cmds = tubes_to_commands(CURVE_EMIT)
+    assert [c["command"] for c in cmds] == ["scene.createSweptPipe"] * 3
+    assert cmds[0]["params"]["filletRadius"] == 0
+    assert cmds[1]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert cmds[2]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert all(c["params"]["autoFillet"] is False for c in cmds)
+
+
 def test_query_with_keyword_skips_predictor_and_returns_swept_pipes(client, blueprint_env):
     payload = {"taskContext": {"userText": f"place CUR1000650 1:10 {MILESTONE_01_KEYWORD}"}}
     options = {"provider": "claude", "model": "claude-haiku-4-5"}
@@ -151,6 +255,34 @@ def test_query_with_keyword_skips_predictor_and_returns_swept_pipes(client, blue
     assert "no LLM" in body["reasoning"].lower() or "skipped LLM" in body["reasoning"]
     assert "n=2" in body["reasoning"]
     assert body["todo"]
+
+
+def test_query_curve_emit_skips_llm_and_maps_fillets(client, blueprint_env):
+    payload = {"taskContext": {"userText": f"place CUR1000650 curves {MILESTONE_01_KEYWORD}"}}
+    options = {"provider": "claude", "model": "claude-haiku-4-5"}
+
+    with (
+        patch("app.main._get_predictor") as get_predictor,
+        patch("app.predictor.claude_predictor.ClaudePredictor.query") as claude_query,
+        patch("app.predictor.mock_predictor.MockPredictor.query") as mock_query,
+        patch("app.milestone_01_mock.subprocess.run", side_effect=_fake_emit_run(CURVE_EMIT)),
+    ):
+        resp = _post_query(client, payload, options)
+
+    assert resp.status_code == 200
+    get_predictor.assert_not_called()
+    claude_query.assert_not_called()
+    mock_query.assert_not_called()
+    commands = resp.json()["commands"]
+    assert len(commands) == 3
+    assert commands[0]["params"]["filletRadius"] == 0
+    assert len(commands[1]["params"]["points"]) == 3
+    assert commands[1]["params"]["filletRadius"] != 0
+    assert commands[1]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert len(commands[2]["params"]["points"]) == 4
+    assert commands[2]["params"]["filletRadius"] == pytest.approx(0.047)
+    assert all(c["params"]["autoFillet"] is False for c in commands)
+    assert all(c["command"] == "scene.createSweptPipe" for c in commands)
 
 
 def test_query_without_keyword_uses_normal_predictor(client, blueprint_env):

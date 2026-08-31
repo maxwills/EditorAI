@@ -89,6 +89,25 @@ def _is_missing_executable(python: str) -> bool:
     return False
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def world_fillet_radius(tube: dict[str, Any], n_points: int, plot_to_world: float) -> float:
+    #: COMMAND_REGISTRY filletRadius is world metres; emit R is plot mm (world = R * plotToWorld).
+    #: Prefer emit filletRadius when already world (non-zero); else convert R. Never invent R.
+    #: 2-pt straights: always 0. autoFillet stays false at the command layer.
+    if n_points <= 2:
+        return 0.0
+    fr = tube.get("filletRadius")
+    if _is_number(fr) and fr != 0:
+        return float(fr)
+    r = tube.get("R")
+    if _is_number(r) and r != 0:
+        return float(r) * float(plot_to_world)
+    return 0.0
+
+
 def tubes_to_commands(emit: dict[str, Any]) -> list[dict[str, Any]]:
     """One scene.createSweptPipe per emit tube. Plot units; no glue; no invented families."""
     plot_to_world = emit.get("plotToWorld", _PLOT_TO_WORLD)
@@ -108,7 +127,7 @@ def tubes_to_commands(emit: dict[str, Any]) -> list[dict[str, Any]]:
             "diameter": diameter,
             "plotToWorld": plot_to_world,
             "autoFillet": False,
-            "filletRadius": 0,
+            "filletRadius": world_fillet_radius(tube, len(points), plot_to_world),
         }
         name = tube.get("name")
         if isinstance(name, str) and name:

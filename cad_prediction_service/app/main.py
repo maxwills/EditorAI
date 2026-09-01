@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -6,6 +7,12 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.milestone_01_mock import (
+    keyword_present as _milestone_01_present,
+    run_milestone_01,
+    run_milestone_01_design,
+    strip_keyword as _strip_milestone_01_keyword,
+)
 from app.predictor.base import PredictorAdapter
 from app.predictor.claude_predictor import CLAUDE_MODEL, ClaudePredictor
 from app.predictor.mock_predictor import MockPredictor
@@ -173,6 +180,14 @@ def _check_dev_mode(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return DEV_MODE_SYSTEM_PREFIX, payload
 
 
+def _try_parse_payload(payload: str) -> Any | None:
+    """Best-effort JSON parse for keyword scanning; None if invalid."""
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+
+
 def _pop_error(raw: dict[str, Any]) -> str | None:
     """Extract the _error sentinel (if any) from a predictor result dict."""
     return raw.pop("_error", None)
@@ -216,6 +231,13 @@ async def query(
     files: Annotated[list[UploadFile], File(description="Optional files to attach (image, PDF, Excel, DXF, etc.).")] = [],
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
+    parsed_payload = _try_parse_payload(payload)
+    if _milestone_01_present(payload, options, parsed_payload):
+        #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
+        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+        log.info("[/query] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
+        return await asyncio.to_thread(run_milestone_01)
+
     parsed_payload = _parse_form_json("payload", payload)
     system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
@@ -248,6 +270,12 @@ async def query_design(
     Same prompt as /query but prefixed with design-analysis instructions.
     Commands are not dispatched; the LLM analyses gaps and produces desiredCommands / designFeedback.
     """
+    parsed_payload = _try_parse_payload(payload)
+    if _milestone_01_present(payload, options, parsed_payload):
+        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+        log.info("[/query-design] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
+        return await asyncio.to_thread(run_milestone_01_design)
+
     parsed_payload = _parse_form_json("payload", payload)
     system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))

@@ -8,10 +8,14 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.milestone_01_mock import (
-    keyword_present as _milestone_01_present,
+    MILESTONE_01_KEYWORD,
+    OUTER_U_KEYWORD,
+    keyword_present as _keyword_present,
     run_milestone_01,
     run_milestone_01_design,
-    strip_keyword as _strip_milestone_01_keyword,
+    run_outer_u,
+    run_outer_u_design,
+    strip_keyword as _strip_keyword,
 )
 from app.predictor.base import PredictorAdapter
 from app.predictor.claude_predictor import CLAUDE_MODEL, ClaudePredictor
@@ -232,9 +236,15 @@ async def query(
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
     parsed_payload = _try_parse_payload(payload)
-    if _milestone_01_present(payload, options, parsed_payload):
+    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (n=1 nest2_1892_3270, not the short 1:10 n=20).
+    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
         #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
-        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
+        log.info("[/query] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
+        return await asyncio.to_thread(run_outer_u)
+    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
+        #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
+        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
         log.info("[/query] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
         return await asyncio.to_thread(run_milestone_01)
 
@@ -271,8 +281,12 @@ async def query_design(
     Commands are not dispatched; the LLM analyses gaps and produces desiredCommands / designFeedback.
     """
     parsed_payload = _try_parse_payload(payload)
-    if _milestone_01_present(payload, options, parsed_payload):
-        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
+        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
+        log.info("[/query-design] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
+        return await asyncio.to_thread(run_outer_u_design)
+    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
+        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
         log.info("[/query-design] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
         return await asyncio.to_thread(run_milestone_01_design)
 

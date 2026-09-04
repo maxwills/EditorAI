@@ -1,6 +1,7 @@
 """Keyword mocks: run Blub's emit CLI instead of any LLM and map tubes to Agent commands.
 
-MILESTONE_01_MOCK → `emit` (short 1:10). OUTER_U_MOCK → `emit-outer-u` (one U, 1:50 overlay).
+MILESTONE_01_MOCK → `emit` (short 1:10). OUTER_U_MOCK → `emit-outer-u --preunion-glue`
+(opt-in growth tubes, n=18 = locked 12 + yup_r115_*; not the signed fallback n=12).
 OUTER_U_MOCK wins when both keywords appear.
 """
 
@@ -20,8 +21,11 @@ from app.utils.logging_utils import log
 #: serialized parsed payload) skips Claude/Ollama/MockPredictor and runs emit.
 MILESTONE_01_KEYWORD = "MILESTONE_01_MOCK"
 
-#: Same detection style; runs emit-outer-u (one outer U at 1:50), not default emit.
+#: Same detection style; runs emit-outer-u --preunion-glue (n=18 growth tubes), not default emit.
 OUTER_U_KEYWORD = "OUTER_U_MOCK"
+
+#: Without this flag emit-outer-u returns the signed fallback n=12, not yup_r115_* growth tubes.
+_OUTER_U_CLI_ARGS = ["--preunion-glue"]
 
 #: Max's local blueprint-processing checkout (emit lives on branch emit-tubev2-1-10-straights).
 _DEFAULT_ROOT = r"D:\Max\Docs\BlueprintProcessing\BlueprintProcessing"
@@ -188,16 +192,24 @@ def _success_response(
     )
 
 
-def run_emit_cli(subcommand: str = "emit") -> tuple[dict[str, Any] | None, str, str]:
-    """Run `python -m blueprint_processing <subcommand> <pdf> <json>`.
+def run_emit_cli(
+    subcommand: str = "emit",
+    extra_cli_args: list[str] | None = None,
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Run `python -m blueprint_processing <subcommand> <pdf> <json> [extra]`.
 
     Returns (parsed_json_or_None, error_or_empty, cli_summary).
     Never invents tubes: CLI failure → (None, reason, cli).
     """
+    extra_cli_args = list(extra_cli_args or [])
+    extra_s = (" " + " ".join(extra_cli_args)) if extra_cli_args else ""
     root = _resolve_root()
     pdf = _resolve_pdf(root)
     python = _resolve_python(root)
-    cli_used = f"{python} -m blueprint_processing {subcommand} {pdf} <temp.json> (cwd={root}, PYTHONPATH=src)"
+    cli_used = (
+        f"{python} -m blueprint_processing {subcommand} {pdf} <temp.json>"
+        f"{extra_s} (cwd={root}, PYTHONPATH=src)"
+    )
 
     if not root.is_dir():
         return None, f"BLUEPRINT_PROCESSING_ROOT not found: {root}", cli_used
@@ -216,7 +228,7 @@ def run_emit_cli(subcommand: str = "emit") -> tuple[dict[str, Any] | None, str, 
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = src if not existing else src + os.pathsep + existing
 
-        cmd = [python, "-m", "blueprint_processing", subcommand, str(pdf), out_path]
+        cmd = [python, "-m", "blueprint_processing", subcommand, str(pdf), out_path, *extra_cli_args]
         log.info("[%s] running: %s", subcommand, cli_used)
         result = subprocess.run(
             cmd,
@@ -255,10 +267,14 @@ def run_emit_cli(subcommand: str = "emit") -> tuple[dict[str, Any] | None, str, 
             Path(out_path).unlink(missing_ok=True)
 
 
-def _run_keyword_cli(subcommand: str, keyword: str) -> QueryResponse:
+def _run_keyword_cli(
+    subcommand: str,
+    keyword: str,
+    extra_cli_args: list[str] | None = None,
+) -> QueryResponse:
     """Skip all predictors; CLI tubes → scene.createSweptPipe QueryResponse."""
     try:
-        data, err, cli_used = run_emit_cli(subcommand)
+        data, err, cli_used = run_emit_cli(subcommand, extra_cli_args)
         if err or data is None:
             log.error("[%s] %s", keyword, err)
             return _error_response(err or f"{subcommand} returned no data", cli_used, keyword, subcommand)
@@ -277,8 +293,8 @@ def run_milestone_01() -> QueryResponse:
 
 
 def run_outer_u() -> QueryResponse:
-    """Skip all predictors; emit-outer-u tubes → scene.createSweptPipe QueryResponse."""
-    return _run_keyword_cli("emit-outer-u", OUTER_U_KEYWORD)
+    """Skip all predictors; emit-outer-u --preunion-glue → scene.createSweptPipe QueryResponse."""
+    return _run_keyword_cli("emit-outer-u", OUTER_U_KEYWORD, extra_cli_args=_OUTER_U_CLI_ARGS)
 
 
 def run_milestone_01_design() -> QueryDesignResponse:
@@ -287,5 +303,5 @@ def run_milestone_01_design() -> QueryDesignResponse:
 
 
 def run_outer_u_design() -> QueryDesignResponse:
-    """Same emit-outer-u path for /query-design so OUTER_U_MOCK never hits an LLM there either."""
+    """Same emit-outer-u --preunion-glue path for /query-design so OUTER_U_MOCK never hits an LLM."""
     return QueryDesignResponse(**run_outer_u().model_dump())

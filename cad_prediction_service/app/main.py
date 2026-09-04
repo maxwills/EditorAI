@@ -236,11 +236,11 @@ async def query(
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
     parsed_payload = _try_parse_payload(payload)
-    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (one U, not the short 1:10).
+    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (growth tubes, not the short 1:10).
     if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
         #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
         parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
-        log.info("[/query] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u CLI.")
+        log.info("[/query] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --preunion-glue CLI.")
         return await asyncio.to_thread(run_outer_u)
     if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
         #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
@@ -283,7 +283,7 @@ async def query_design(
     parsed_payload = _try_parse_payload(payload)
     if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
         parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
-        log.info("[/query-design] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u CLI.")
+        log.info("[/query-design] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --preunion-glue CLI.")
         return await asyncio.to_thread(run_outer_u_design)
     if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
         parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)

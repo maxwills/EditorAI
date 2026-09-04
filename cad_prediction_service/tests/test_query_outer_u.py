@@ -1,4 +1,4 @@
-"""POST /query and /query-design OUTER_U_MOCK: emit-outer-u CLI → scene.createSweptPipe, never an LLM."""
+"""POST /query and /query-design OUTER_U_MOCK: emit-outer-u --preunion-glue → scene.createSweptPipe, never an LLM."""
 
 from __future__ import annotations
 
@@ -81,6 +81,10 @@ def blueprint_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, 
 def _fake_cli_run(emit: dict, subcommand: str):
     def _run(cmd, cwd=None, env=None, capture_output=False, encoding=None, errors=None, timeout=None):
         assert cmd[1:4] == ["-m", "blueprint_processing", subcommand]
+        if subcommand == "emit-outer-u":
+            assert cmd[6:] == ["--preunion-glue"]
+        else:
+            assert "--preunion-glue" not in cmd
         Path(cmd[5]).write_text(json.dumps(emit), encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -171,6 +175,7 @@ def test_query_with_keyword_skips_predictor_and_runs_emit_outer_u(client, bluepr
     cmd = run.call_args[0][0]
     assert cmd[1:4] == ["-m", "blueprint_processing", "emit-outer-u"]
     assert cmd[3] != "emit"
+    assert cmd[6:] == ["--preunion-glue"]
     assert run.call_args.kwargs["cwd"] == str(blueprint_env["root"])
     assert str(blueprint_env["root"] / "src") in run.call_args.kwargs["env"]["PYTHONPATH"]
 
@@ -184,6 +189,7 @@ def test_query_with_keyword_skips_predictor_and_runs_emit_outer_u(client, bluepr
     assert commands[0]["params"]["filletRadius"] == pytest.approx(0.047)
     assert "OUTER_U_MOCK" in body["reasoning"]
     assert "emit-outer-u" in body["reasoning"]
+    assert "--preunion-glue" in body["reasoning"]
     assert "skipped LLM" in body["reasoning"]
     assert "n=1" in body["reasoning"]
     assert "n=20" not in body["reasoning"]
@@ -212,6 +218,7 @@ def test_query_design_with_keyword_skips_predictor_and_runs_emit_outer_u(client,
     mock_query.assert_not_called()
     cmd = run.call_args[0][0]
     assert cmd[1:4] == ["-m", "blueprint_processing", "emit-outer-u"]
+    assert cmd[6:] == ["--preunion-glue"]
     assert len(body["commands"]) == 1
     assert body["commands"][0]["command"] == "scene.createSweptPipe"
     assert "OUTER_U_MOCK" in body["reasoning"]
@@ -240,6 +247,7 @@ def test_both_keywords_outer_u_wins_one_u_not_short_1_10(client, blueprint_env):
     cmd = run.call_args[0][0]
     assert cmd[3] == "emit-outer-u"
     assert cmd[3] != "emit"
+    assert cmd[6:] == ["--preunion-glue"]
     body = resp.json()
     assert len(body["commands"]) == 1
     assert "OUTER_U_MOCK" in body["reasoning"]
@@ -265,10 +273,12 @@ def test_milestone_01_still_runs_emit_not_outer_u(client, blueprint_env):
     cmd = run.call_args[0][0]
     assert cmd[1:4] == ["-m", "blueprint_processing", "emit"]
     assert cmd[3] != "emit-outer-u"
+    assert "--preunion-glue" not in cmd
     body = resp.json()
     assert "MILESTONE_01_MOCK" in body["reasoning"]
     assert "emit n=" in body["reasoning"]
     assert "emit-outer-u" not in body["reasoning"]
+    assert "--preunion-glue" not in body["reasoning"]
     assert "OUTER_U_MOCK" not in body["reasoning"]
 
 
@@ -287,7 +297,9 @@ def test_query_keyword_in_options_triggers_outer_u(client, blueprint_env):
 
     assert resp.status_code == 200
     get_predictor.assert_not_called()
-    assert run.call_args[0][0][3] == "emit-outer-u"
+    cmd = run.call_args[0][0]
+    assert cmd[3] == "emit-outer-u"
+    assert cmd[6:] == ["--preunion-glue"]
     assert "OUTER_U_MOCK" in resp.json()["reasoning"]
 
 
@@ -313,6 +325,7 @@ def test_query_cli_nonzero_exit_returns_empty_commands_and_stderr(client, bluepr
 
     def _fail(cmd, **kwargs):
         assert cmd[3] == "emit-outer-u"
+        assert cmd[6:] == ["--preunion-glue"]
         return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="emit-outer-u: missing overlay")
 
     with (
@@ -354,7 +367,7 @@ def test_query_missing_pdf_does_not_invent_tubes_or_call_llm(client, tmp_path, m
 
 
 def test_query_runs_real_python_m_emit_outer_u_module(client, tmp_path, monkeypatch):
-    """End-to-end CLI: python -m blueprint_processing emit-outer-u writes JSON; no subprocess stub."""
+    """End-to-end CLI: python -m blueprint_processing emit-outer-u --preunion-glue writes JSON; no subprocess stub."""
     root = tmp_path / "BlueprintProcessing"
     pkg = root / "src" / "blueprint_processing"
     pkg.mkdir(parents=True)
@@ -365,8 +378,8 @@ def test_query_runs_real_python_m_emit_outer_u_module(client, tmp_path, monkeypa
         f"EMIT = {SAMPLE_OUTER_U_EMIT!r}\n"
         "def main():\n"
         "    args = sys.argv[1:]\n"
-        "    if not args or args[0] != 'emit-outer-u' or len(args) != 3:\n"
-        "        print('usage: emit-outer-u <pdf> <json>', file=sys.stderr)\n"
+        "    if not args or args[0] != 'emit-outer-u' or len(args) != 4 or args[3] != '--preunion-glue':\n"
+        "        print('usage: emit-outer-u <pdf> <json> --preunion-glue', file=sys.stderr)\n"
         "        sys.exit(2)\n"
         "    Path(args[2]).write_text(json.dumps(EMIT), encoding='utf-8')\n"
         "if __name__ == '__main__':\n"
@@ -396,3 +409,4 @@ def test_query_runs_real_python_m_emit_outer_u_module(client, tmp_path, monkeypa
     assert body["commands"][0]["params"]["autoFillet"] is False
     assert body["commands"][0]["params"]["filletRadius"] == pytest.approx(0.047)
     assert "blueprint_processing emit-outer-u" in body["reasoning"]
+    assert "--preunion-glue" in body["reasoning"]

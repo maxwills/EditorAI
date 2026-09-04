@@ -1,4 +1,4 @@
-"""POST /query and /query-design OUTER_U_MOCK: emit-outer-u --preunion-glue → scene.createSweptPipe, never an LLM."""
+"""POST /query and /query-design OUTER_U_MOCK: emit-outer-u --preunion-glue (n=14) → scene.createSweptPipe, never an LLM."""
 
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ from app.milestone_01_mock import (
     tubes_to_commands,
 )
 
-#: One outer U at 1:50. R is plot mm; world fillet = R * 0.001.
+#: Product --preunion-glue count is n=14 (locked 12 + yup_r115_0/1). One mapping sample; do not invent the other tubes.
 SAMPLE_OUTER_U_EMIT = {
     "unit": "plot",
     "scale": "1:50",
     "plotToWorld": 0.001,
-    "n": 1,
+    "n": 14,
     "tubes": [
         {
             "name": "outer_u",
@@ -40,6 +40,7 @@ SAMPLE_OUTER_U_EMIT = {
     ],
 }
 
+#: MILESTONE_01 emit product n=20; no --preunion-glue. Mapping sample only.
 SAMPLE_EMIT_SHORT = {
     "unit": "plot",
     "scale": "1:10",
@@ -191,7 +192,9 @@ def test_query_with_keyword_skips_predictor_and_runs_emit_outer_u(client, bluepr
     assert "emit-outer-u" in body["reasoning"]
     assert "--preunion-glue" in body["reasoning"]
     assert "skipped LLM" in body["reasoning"]
-    assert "n=1" in body["reasoning"]
+    assert "n=14" in body["reasoning"]
+    assert "n=18" not in body["reasoning"]
+    assert "n=12" not in body["reasoning"]
     assert "n=20" not in body["reasoning"]
     assert body["todo"]
 
@@ -222,6 +225,9 @@ def test_query_design_with_keyword_skips_predictor_and_runs_emit_outer_u(client,
     assert len(body["commands"]) == 1
     assert body["commands"][0]["command"] == "scene.createSweptPipe"
     assert "OUTER_U_MOCK" in body["reasoning"]
+    assert "n=14" in body["reasoning"]
+    assert "n=18" not in body["reasoning"]
+    assert "n=20" not in body["reasoning"]
     assert body["desiredCommands"] == []
     assert body["designFeedback"] == []
 
@@ -252,7 +258,9 @@ def test_both_keywords_outer_u_wins_one_u_not_short_1_10(client, blueprint_env):
     assert len(body["commands"]) == 1
     assert "OUTER_U_MOCK" in body["reasoning"]
     assert "emit-outer-u" in body["reasoning"]
-    assert "n=1" in body["reasoning"]
+    assert "n=14" in body["reasoning"]
+    assert "n=18" not in body["reasoning"]
+    assert "n=20" not in body["reasoning"]
     assert "MILESTONE_01_MOCK:" not in body["reasoning"]
 
 
@@ -277,6 +285,8 @@ def test_milestone_01_still_runs_emit_not_outer_u(client, blueprint_env):
     body = resp.json()
     assert "MILESTONE_01_MOCK" in body["reasoning"]
     assert "emit n=" in body["reasoning"]
+    assert "n=20" in body["reasoning"]
+    assert "n=14" not in body["reasoning"]
     assert "emit-outer-u" not in body["reasoning"]
     assert "--preunion-glue" not in body["reasoning"]
     assert "OUTER_U_MOCK" not in body["reasoning"]
@@ -300,7 +310,9 @@ def test_query_keyword_in_options_triggers_outer_u(client, blueprint_env):
     cmd = run.call_args[0][0]
     assert cmd[3] == "emit-outer-u"
     assert cmd[6:] == ["--preunion-glue"]
-    assert "OUTER_U_MOCK" in resp.json()["reasoning"]
+    reasoning = resp.json()["reasoning"]
+    assert "OUTER_U_MOCK" in reasoning
+    assert "n=14" in reasoning
 
 
 def test_query_without_keyword_uses_normal_predictor(client, blueprint_env):
@@ -410,3 +422,6 @@ def test_query_runs_real_python_m_emit_outer_u_module(client, tmp_path, monkeypa
     assert body["commands"][0]["params"]["filletRadius"] == pytest.approx(0.047)
     assert "blueprint_processing emit-outer-u" in body["reasoning"]
     assert "--preunion-glue" in body["reasoning"]
+    assert "n=14" in body["reasoning"]
+    assert "n=18" not in body["reasoning"]
+    assert "n=20" not in body["reasoning"]

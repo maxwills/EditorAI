@@ -236,7 +236,7 @@ async def query(
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
     parsed_payload = _try_parse_payload(payload)
-    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (growth tubes, not the short 1:10).
+    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (n=14 growth tubes, not the short 1:10 n=20).
     if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
         #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
         parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)

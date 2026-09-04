@@ -1,7 +1,7 @@
 """Keyword mocks: run Blub's emit CLI instead of any LLM and map tubes to Agent commands.
 
-MILESTONE_01_MOCK → `emit` (short 1:10). OUTER_U_MOCK → `emit-outer-u --preunion-glue`
-(opt-in growth tubes, n=18 = locked 12 + yup_r115_*; not the signed fallback n=12).
+MILESTONE_01_MOCK → `emit` (short 1:10, n=20). OUTER_U_MOCK → `emit-outer-u --preunion-glue`
+(opt-in growth tubes, n=14 = locked 12 + yup_r115_0/1; not the signed fallback n=12).
 OUTER_U_MOCK wins when both keywords appear.
 """
 
@@ -21,10 +21,10 @@ from app.utils.logging_utils import log
 #: serialized parsed payload) skips Claude/Ollama/MockPredictor and runs emit.
 MILESTONE_01_KEYWORD = "MILESTONE_01_MOCK"
 
-#: Same detection style; runs emit-outer-u --preunion-glue (n=18 growth tubes), not default emit.
+#: Same detection style; runs emit-outer-u --preunion-glue (n=14 = locked 12 + yup_r115_0/1), not default emit.
 OUTER_U_KEYWORD = "OUTER_U_MOCK"
 
-#: Without this flag emit-outer-u returns the signed fallback n=12, not yup_r115_* growth tubes.
+#: Without this flag emit-outer-u returns the signed fallback n=12, not yup_r115_0/1 growth tubes.
 _OUTER_U_CLI_ARGS = ["--preunion-glue"]
 
 #: Max's local blueprint-processing checkout (emit lives on branch emit-tubev2-1-10-straights).
@@ -293,7 +293,7 @@ def run_milestone_01() -> QueryResponse:
 
 
 def run_outer_u() -> QueryResponse:
-    """Skip all predictors; emit-outer-u --preunion-glue → scene.createSweptPipe QueryResponse."""
+    """Skip all predictors; emit-outer-u --preunion-glue (n=14) → scene.createSweptPipe QueryResponse."""
     return _run_keyword_cli("emit-outer-u", OUTER_U_KEYWORD, extra_cli_args=_OUTER_U_CLI_ARGS)
 
 

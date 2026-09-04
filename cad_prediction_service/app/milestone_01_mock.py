@@ -1,7 +1,7 @@
 """Keyword mocks: run Blub's emit CLI instead of any LLM and map tubes to Agent commands.
 
-MILESTONE_01_MOCK → `emit` (short 1:10, n=20). OUTER_U_MOCK → `emit-outer-u --preunion-glue`
-(opt-in growth tubes, n=14 = locked 12 + yup_r115_0/1; not the signed fallback n=12).
+MILESTONE_01_MOCK → `emit` (short 1:10, n=20). OUTER_U_MOCK → `emit-outer-u --one`
+(product n=1 nest2_1892_3270 on 1:50; not --preunion-glue n=14).
 OUTER_U_MOCK wins when both keywords appear.
 """
 
@@ -21,11 +21,11 @@ from app.utils.logging_utils import log
 #: serialized parsed payload) skips Claude/Ollama/MockPredictor and runs emit.
 MILESTONE_01_KEYWORD = "MILESTONE_01_MOCK"
 
-#: Same detection style; runs emit-outer-u --preunion-glue (n=14 = locked 12 + yup_r115_0/1), not default emit.
+#: Same detection style; runs emit-outer-u --one (product n=1 nest2_1892_3270), not default emit, not --preunion-glue.
 OUTER_U_KEYWORD = "OUTER_U_MOCK"
 
-#: Without this flag emit-outer-u returns the signed fallback n=12, not yup_r115_0/1 growth tubes.
-_OUTER_U_CLI_ARGS = ["--preunion-glue"]
+#: --one is the 1:10-piece-on-1:50 cut (nest2_1892_3270). --preunion-glue is n=14 and is not this path.
+_OUTER_U_CLI_ARGS = ["--one"]
 
 #: Max's local blueprint-processing checkout (emit lives on branch emit-tubev2-1-10-straights).
 _DEFAULT_ROOT = r"D:\Max\Docs\BlueprintProcessing\BlueprintProcessing"
@@ -293,7 +293,7 @@ def run_milestone_01() -> QueryResponse:
 
 
 def run_outer_u() -> QueryResponse:
-    """Skip all predictors; emit-outer-u --preunion-glue (n=14) → scene.createSweptPipe QueryResponse."""
+    """Skip all predictors; emit-outer-u --one (n=1 nest2_1892_3270) → scene.createSweptPipe QueryResponse."""
     return _run_keyword_cli("emit-outer-u", OUTER_U_KEYWORD, extra_cli_args=_OUTER_U_CLI_ARGS)
 
 
@@ -303,5 +303,5 @@ def run_milestone_01_design() -> QueryDesignResponse:
 
 
 def run_outer_u_design() -> QueryDesignResponse:
-    """Same emit-outer-u --preunion-glue path for /query-design so OUTER_U_MOCK never hits an LLM."""
+    """Same emit-outer-u --one path for /query-design so OUTER_U_MOCK never hits an LLM."""
     return QueryDesignResponse(**run_outer_u().model_dump())

@@ -218,6 +218,10 @@ def predict(request: PredictRequest) -> PredictResponse:
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        #: Parse/_error must not be treated as a valid empty schema (QueryResponse defaults all fields).
+        if error_detail:
+            log.error("[/predict] predictor _error: %s", error_detail)
+            return fallback_response(model=model_name, provider=provider_name, detail=error_detail)
         validated = validate_response(raw)
         if validated is not None:
             return validated
@@ -259,6 +263,9 @@ async def query(
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        if error_detail:
+            log.error("[/query] predictor _error: %s", error_detail)
+            return fallback_query_response(detail=error_detail)
         validated = validate_query_response(raw)
         if validated is not None:
             return validated
@@ -301,6 +308,9 @@ async def query_design(
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        if error_detail:
+            log.error("[/query-design] predictor _error: %s", error_detail)
+            return fallback_query_design_response(detail=error_detail)
         validated = validate_query_design_response(raw)
         if validated is not None:
             return validated

@@ -258,7 +258,7 @@ async def query(
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
     attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
-    raw = predictor.query(request.payload, attachments, system_prefix=system_prefix)
+    raw = predictor.query(request.payload, attachments, system_prefix=system_prefix, thinking_budget=request.options.thinking_budget)
 
     if raw is not None:
         error_detail = _pop_error(raw)
@@ -303,7 +303,7 @@ async def query_design(
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
     attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
-    raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix)
+    raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix, thinking_budget=request.options.thinking_budget)
 
     if raw is not None:
         error_detail = _pop_error(raw)

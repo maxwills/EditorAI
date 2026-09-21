@@ -15,6 +15,8 @@ class Options(BaseModel):
     include_full_answer: bool = False
     #: Include the prompt that was sent to the LLM in the reply (useful for prompt tuning).
     include_prompt: bool = False
+    #: Extended thinking token budget. 0 = disabled (default), None = omit (model adaptive), ≥1024 = enabled with that cap.
+    thinking_budget: Optional[int] = 0
 
 
 # ── Request models ─────────────────────────────────────────────────────────────

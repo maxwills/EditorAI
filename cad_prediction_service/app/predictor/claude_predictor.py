@@ -90,7 +90,9 @@ class ClaudePredictor(PredictorAdapter):
     def __init__(self, model: str = CLAUDE_MODEL) -> None:
         self.model = model
         self.provider = "claude"
-        self.client = Anthropic(timeout=120.0)  # reads ANTHROPIC_API_KEY from env
+        #: Total request timeout. max_retries=0 avoids silent 3x multiplication on timeout.
+        #: Large PDF + extended-thinking requests can legitimately take 3-5 min.
+        self.client = Anthropic(timeout=360.0, max_retries=0)  # reads ANTHROPIC_API_KEY from env
 
     def predict(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         request = PredictRequest(**payload)
@@ -135,18 +137,32 @@ class ClaudePredictor(PredictorAdapter):
         user_content: Any,
         max_tokens: int = 16384,
         log_tag: str = "query",
+        thinking_budget: int | None = 0,
     ) -> tuple[str | None, str | None]:
         """Send a single system+user turn to Claude.
 
+        thinking_budget: token budget for extended thinking.
+          0     → explicitly disabled (default).
+          None  → omit the parameter entirely (model default / adaptive).
+          N > 0 → enabled with that token cap.
         Returns (text, stop_reason). text is None on API error.
         """
+        kwargs: dict[str, Any] = dict(
+            model=self.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        if thinking_budget is None:
+            pass  # let the model decide (adaptive by default on sonnet-5)
+        elif thinking_budget == 0:
+            kwargs["thinking"] = {"type": "disabled"}
+        else:
+            #: API minimum is 1024 tokens; clamp silently to avoid a 400 error.
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": max(1024, thinking_budget)}
+
         try:
-            message = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user_content}],
-            )
+            message = self.client.messages.create(**kwargs)
         except APIError as exc:
             log.error("[ClaudePredictor] %s API error: %s", log_tag, exc)
             return None, None
@@ -154,12 +170,12 @@ class ClaudePredictor(PredictorAdapter):
         _log_claude_message(message, log_tag, raw_text)
         return raw_text, getattr(message, "stop_reason", None)
 
-    def query(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any] | None:
+    def query(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "", thinking_budget: int | None = 0) -> dict[str, Any] | None:
         system = system_prefix + build_query_system_prompt()
         user_content = to_content_blocks(build_query_user_content(payload), attachments or [])
         prompt_logged = build_query_prompt(payload)
 
-        raw_text, stop_reason = self._call_claude(system, user_content, log_tag="query")
+        raw_text, stop_reason = self._call_claude(system, user_content, log_tag="query", thinking_budget=thinking_budget)
         if raw_text is None:
             return None
 
@@ -183,12 +199,12 @@ class ClaudePredictor(PredictorAdapter):
 
         return parsed
 
-    def query_design(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "") -> dict[str, Any] | None:
+    def query_design(self, payload: dict[str, Any], attachments: list | None = None, system_prefix: str = "", thinking_budget: int | None = 0) -> dict[str, Any] | None:
         system = system_prefix + build_query_design_system_prompt()
         user_content = to_content_blocks(build_query_user_content(payload), attachments or [])
         prompt_logged = build_query_design_prompt(payload)
 
-        raw_text, stop_reason = self._call_claude(system, user_content, log_tag="query_design")
+        raw_text, stop_reason = self._call_claude(system, user_content, log_tag="query_design", thinking_budget=thinking_budget)
         if raw_text is None:
             return None
 

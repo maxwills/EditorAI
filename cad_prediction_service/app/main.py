@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.autoplot_regions import AutoPlotRegionsError, run as run_autoplot_regions
 from app.milestone_01_mock import (
     MILESTONE_01_KEYWORD,
     OUTER_U_KEYWORD,
@@ -205,6 +206,22 @@ def _strip_debug_fields(raw: dict[str, Any], options) -> None:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.post("/autoplot")
+async def autoplot(
+    text: str = Form(..., description="Required text. Not interpreted in this version."),
+    file: Annotated[UploadFile | None, File(description="Optional PDF. Ignored; the server uses its local copy.")] = None,
+) -> dict[str, Any]:
+    """AutoPlot entry. Later versions keep this path. No LLM. `file` is accepted and ignored."""
+    del file
+    try:
+        return await asyncio.to_thread(run_autoplot_regions, text)
+    except AutoPlotRegionsError as exc:
+        log.error("[/autoplot] %s", exc.detail)
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+
+
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest) -> PredictResponse:

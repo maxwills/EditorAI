@@ -209,10 +209,10 @@ def _strip_debug_fields(raw: dict[str, Any], options) -> None:
 
 @app.post("/autoplot")
 async def autoplot(
-    text: str = Form(..., description="Required text. Not interpreted in this version."),
+    text: str = Form(..., description="Required text. Not interpreted."),
     file: Annotated[UploadFile | None, File(description="Optional PDF. Ignored; the server uses its local copy.")] = None,
 ) -> dict[str, Any]:
-    """AutoPlot entry. Later versions keep this path. No LLM. `file` is accepted and ignored."""
+    """AutoPlot entry. Later versions keep this path. `file` is accepted and ignored."""
     del file
     try:
         return await asyncio.to_thread(run_autoplot_regions, text)

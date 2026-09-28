@@ -1,4 +1,4 @@
-"""AutoPlot image workflow. The route starts this; the inner step is the v6 loop."""
+"""AutoPlot image workflow. The route starts this; the inner step is the v7 loop. Tubes stay disconnected."""
 
 import base64
 import hashlib
@@ -29,13 +29,14 @@ _ACTIONS = ("crop", "record", "done")
 #: Fixed objective. The editor text is not read.
 OBJECTIVE = (
     "Focus on the two views of the superheater. "
-    "For each view, record the centerline and the bend radius a later version will pass to TubeV2. "
-    "Do not emit a pipe list. Do not draw."
+    "Choose one coil. For each view, record that same coil's centerline and the bend radius. "
+    "Do not record every coil. Do not emit a pipe list. Do not draw."
 )
 NUDGE_PLAN = (
     "Lay a plan first. Reply with JSON only: "
-    '{"plan":[{"action":"crop","why":"one sentence"},{"action":"record","why":"one sentence"},{"action":"done"}]}'
-    ". Each action is crop, record, or done. Do not crop or record in this reply."
+    '{"coil":"one sentence naming the coil",'
+    '"plan":[{"action":"crop","why":"one sentence"},{"action":"record","why":"one sentence"},{"action":"done"}]}'
+    ". Name one coil. Each action is crop, record, or done. Do not crop or record in this reply."
 )
 NUDGE_NEXT = "Reply with one JSON action: crop, record, or done."
 NUDGE_UNKNOWN = "That action is not available. " + NUDGE_NEXT
@@ -44,24 +45,25 @@ NUDGE_BAD_CROP = (
     "box x, y, width, and height are fractions from 0 to 1, origin top-left. "
     + NUDGE_NEXT
 )
-NUDGE_BAD_RECORD = (
-    "That record needs a view sentence, a page box, a centerline of at least two page-fraction points, "
-    'and a positive page-fraction bendRadius. callout is the printed radius text or "". '
-    + NUDGE_NEXT
-)
-NUDGE_EARLY_DONE = "Both superheater views are not recorded yet. Record each view, then done."
+NUDGE_EARLY_DONE = "Both superheater views are not recorded yet. Record each view of that coil, then done."
 
 SYSTEM_PROMPT = (
     OBJECTIVE + " "
     "The first reply is a plan only. Later replies are exactly one action. "
     "Actions: crop, record, done. "
-    'Plan JSON: {"plan":[{"action":"crop","why":"one sentence"},{"action":"record","why":"one sentence"},{"action":"done"}]}. '
+    'Plan JSON: {"coil":"one sentence naming the coil",'
+    '"plan":[{"action":"crop","why":"one sentence"},{"action":"record","why":"one sentence"},{"action":"done"}]}. '
+    "coil names the one coil both views will record. "
     'crop: {"action":"crop","box":{"x":0,"y":0,"width":1,"height":1}}. '
     "box x, y, width, and height are fractions of the page from 0 to 1. Origin is the top-left. "
     'record: {"action":"record","view":"one sentence","box":{"x":0,"y":0,"width":1,"height":1},'
     '"centerline":[{"x":0,"y":0},{"x":1,"y":0}],"bendRadius":0.01,"callout":""}. '
     "view names that view. The same view sentence replaces it. "
-    "centerline points are page fractions, at least two. "
+    "Both views record the coil named in the plan, not a different coil and not every coil. "
+    "centerline points are page fractions in travel order along that coil, from one end to the other. "
+    "Put a point at each change of direction and along each straight run so the polyline follows the coil. "
+    "Do not send only the two ends with unrelated points in between. "
+    "At least two points. There is no point cap. "
     "bendRadius is a page-fraction number. callout is the radius text printed on the sheet, or empty. "
     'done: {"action":"done"}. '
     "No diameter, no thickness, no world coordinates."
@@ -75,13 +77,34 @@ class AutoPlotRegionsError(Exception):
         self.detail = detail
 
 
+def _record_nudge(coil: str | None) -> str:
+    """Reject a record and name the coil the plan already chose."""
+    name = coil.strip() if isinstance(coil, str) and coil.strip() else "the coil named in the plan"
+    return (
+        f'Record "{name}" only. '
+        "That record needs a view sentence, a page box, "
+        "one centerline of at least two page-fraction points in travel order along that coil, "
+        'and a positive page-fraction bendRadius. callout is the printed radius text or "". '
+        "Walk the coil from one end to the other: a point at each change of direction and along each straight run. "
+        "Do not send only the two ends with unrelated points in between. "
+        + NUDGE_NEXT
+    )
+
+
 def run(text: str) -> dict:
-    """Start the image workflow. `text` is required and not interpreted. Returns one command."""
+    """Start the image workflow. `text` is required and not interpreted. Returns the views. Tubes stay disconnected."""
     if not text or not text.strip():
         raise AutoPlotRegionsError(422, "text is required")
     pdf = _read_local_pdf()
     pix = _open_page(pdf)
-    plan, turns, extractions = _agent_loop(ClaudePredictor(), pix, pdf)
+    plan, coil, turns, extractions = _agent_loop(ClaudePredictor(), pix, pdf)
+    for item in extractions:
+        log.info(
+            "[autoplot] extraction %s points=%d centerline=%s",
+            item["view"],
+            len(item["centerline"]),
+            json.dumps(item["centerline"]),
+        )
     return {
         "commands": [
             {
@@ -90,6 +113,8 @@ def run(text: str) -> dict:
             }
         ],
         "analysis": {
+            "part": "superheater",
+            "coil": coil,
             "plan": plan,
             "turns": turns,
             "extractions": extractions,
@@ -97,10 +122,11 @@ def run(text: str) -> dict:
     }
 
 
-def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tuple[list, list, list]:
-    """Plan first, then crop / record / done. Succeeds only with two recorded views."""
+def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tuple[list, str, list, list]:
+    """Plan one coil first, then crop / record / done. Succeeds only with two recorded views."""
     messages: list[dict] = [_opening_user(pdf)]
     plan = None
+    coil = None
     views: list[str] = []
     by_key: dict[str, dict] = {}
     turns: list[dict] = []
@@ -131,7 +157,7 @@ def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tup
         if not blocks:
             blocks = [{"type": "text", "text": raw_text}]
 
-        step = _classify(extract_json(raw_text), plan is not None, views)
+        step = _classify(extract_json(raw_text), plan is not None, views, coil)
         png = _png_b64(pix, step["box"]) if step["accepted"] == "crop" else None
         if step["accepted"] == "crop" and png is None:
             step = {"accepted": "rejected", "nudge": NUDGE_BAD_CROP}
@@ -142,7 +168,9 @@ def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tup
             turn["reply"] = raw_text[:500]
         elif step["accepted"] == "plan":
             plan = step["plan"]
+            coil = step["coil"]
             turn["plan"] = plan
+            turn["coil"] = coil
         elif step["accepted"] == "crop":
             turn["box"] = step["box"]
         elif step["accepted"] == "record":
@@ -157,7 +185,7 @@ def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tup
             _store_view(views, by_key, step["extraction"])
             messages.append({
                 "role": "user",
-                "content": f"Recorded {len(views)} of 2 views. " + NUDGE_NEXT,
+                "content": f'Recorded {len(views)} of 2 views of "{coil}". ' + NUDGE_NEXT,
             })
         elif step["accepted"] == "crop":
             messages.append({"role": "user", "content": _crop_content(png)})
@@ -165,15 +193,15 @@ def _agent_loop(predictor: ClaudePredictor, pix: fitz.Pixmap, pdf: bytes) -> tup
             messages.append({"role": "user", "content": step["nudge"]})
 
     extractions = [by_key[name.casefold()] for name in views]
-    if plan is None or len(extractions) != 2:
-        log.error("[autoplot] incomplete plan=%s turns=%s", json.dumps(plan), json.dumps(turns))
+    if plan is None or not coil or len(extractions) != 2:
+        log.error("[autoplot] incomplete coil=%s plan=%s turns=%s", coil, json.dumps(plan), json.dumps(turns))
         raise AutoPlotRegionsError(422, "Claude did not record two superheater views")
-    return plan, turns, extractions
+    return plan, coil, turns, extractions
 
 
 def _opening_user(pdf: bytes) -> dict:
     content = to_content_blocks(
-        OBJECTIVE + " Lay a plan first. Do not crop or record in this reply.",
+        OBJECTIVE + " Lay a plan first. Name one coil. Do not crop or record in this reply.",
         [RawAttachment(filename=PDF_PATH.name, data=pdf)],
     )
     return {"role": "user", "content": content}
@@ -219,13 +247,13 @@ def _strip_thinking(messages: list[dict]) -> list[dict]:
     return stripped
 
 
-def _classify(parsed: object, have_plan: bool, views: list[str]) -> dict:
+def _classify(parsed: object, have_plan: bool, views: list[str], coil: str | None) -> dict:
     """One reply becomes a plan, one action, or a rejection. Does not store anything."""
     if not have_plan:
-        steps = _plan_steps(parsed)
-        if steps is None:
+        laid = _plan_steps(parsed)
+        if laid is None:
             return {"accepted": "rejected", "nudge": NUDGE_PLAN}
-        return {"accepted": "plan", "plan": steps, "nudge": NUDGE_NEXT}
+        return {"accepted": "plan", "plan": laid["steps"], "coil": laid["coil"], "nudge": NUDGE_NEXT}
 
     action = parsed.get("action") if isinstance(parsed, dict) else None
     if action == "crop":
@@ -236,7 +264,7 @@ def _classify(parsed: object, have_plan: bool, views: list[str]) -> dict:
     if action == "record":
         extraction = _extraction(parsed) if isinstance(parsed, dict) else None
         if extraction is None:
-            return {"accepted": "rejected", "nudge": NUDGE_BAD_RECORD}
+            return {"accepted": "rejected", "nudge": _record_nudge(coil)}
         key = extraction["view"].casefold()
         if key not in {name.casefold() for name in views} and len(views) >= 2:
             names = "; ".join(views)
@@ -252,8 +280,12 @@ def _classify(parsed: object, have_plan: bool, views: list[str]) -> dict:
     return {"accepted": "rejected", "nudge": NUDGE_UNKNOWN}
 
 
-def _plan_steps(parsed: object) -> list[dict] | None:
+def _plan_steps(parsed: object) -> dict | None:
+    """Accept a plan only when it names one coil."""
     if not isinstance(parsed, dict):
+        return None
+    coil = parsed.get("coil")
+    if not isinstance(coil, str) or not coil.strip():
         return None
     steps = parsed.get("plan")
     if not isinstance(steps, list) or not steps:
@@ -267,7 +299,7 @@ def _plan_steps(parsed: object) -> list[dict] | None:
         if isinstance(why, str) and why.strip():
             item["why"] = why.strip()
         ready.append(item)
-    return ready
+    return {"coil": coil.strip(), "steps": ready}
 
 
 def _extraction(parsed: dict) -> dict | None:

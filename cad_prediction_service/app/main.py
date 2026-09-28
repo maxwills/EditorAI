@@ -7,11 +7,16 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.autoplot_regions import AutoPlotRegionsError, run as run_autoplot_regions
 from app.milestone_01_mock import (
-    keyword_present as _milestone_01_present,
+    MILESTONE_01_KEYWORD,
+    OUTER_U_KEYWORD,
+    keyword_present as _keyword_present,
     run_milestone_01,
     run_milestone_01_design,
-    strip_keyword as _strip_milestone_01_keyword,
+    run_outer_u,
+    run_outer_u_design,
+    strip_keyword as _strip_keyword,
 )
 from app.predictor.base import PredictorAdapter
 from app.predictor.claude_predictor import CLAUDE_MODEL, ClaudePredictor
@@ -202,6 +207,22 @@ def _strip_debug_fields(raw: dict[str, Any], options) -> None:
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
+@app.post("/autoplot")
+async def autoplot(
+    text: str = Form(..., description="Required text. Not interpreted."),
+    file: Annotated[UploadFile | None, File(description="Optional PDF. Ignored; the server uses its local copy.")] = None,
+) -> dict[str, Any]:
+    """AutoPlot entry. Later versions keep this path. `file` is accepted and ignored."""
+    del file
+    try:
+        return await asyncio.to_thread(run_autoplot_regions, text)
+    except AutoPlotRegionsError as exc:
+        log.error("[/autoplot] %s", exc.detail)
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+
+
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest) -> PredictResponse:
     """Main prediction endpoint."""
@@ -214,6 +235,10 @@ def predict(request: PredictRequest) -> PredictResponse:
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        #: Parse/_error must not be treated as a valid empty schema (QueryResponse defaults all fields).
+        if error_detail:
+            log.error("[/predict] predictor _error: %s", error_detail)
+            return fallback_response(model=model_name, provider=provider_name, detail=error_detail)
         validated = validate_response(raw)
         if validated is not None:
             return validated
@@ -232,9 +257,15 @@ async def query(
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
     parsed_payload = _try_parse_payload(payload)
-    if _milestone_01_present(payload, options, parsed_payload):
+    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (n=1 nest2_1892_3270, not the short 1:10 n=20).
+    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
         #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
-        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
+        log.info("[/query] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
+        return await asyncio.to_thread(run_outer_u)
+    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
+        #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
+        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
         log.info("[/query] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
         return await asyncio.to_thread(run_milestone_01)
 
@@ -244,11 +275,14 @@ async def query(
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
     attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
-    raw = predictor.query(request.payload, attachments, system_prefix=system_prefix)
+    raw = predictor.query(request.payload, attachments, system_prefix=system_prefix, thinking_budget=request.options.thinking_budget)
 
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        if error_detail:
+            log.error("[/query] predictor _error: %s", error_detail)
+            return fallback_query_response(detail=error_detail)
         validated = validate_query_response(raw)
         if validated is not None:
             return validated
@@ -271,8 +305,12 @@ async def query_design(
     Commands are not dispatched; the LLM analyses gaps and produces desiredCommands / designFeedback.
     """
     parsed_payload = _try_parse_payload(payload)
-    if _milestone_01_present(payload, options, parsed_payload):
-        parsed_payload = _strip_milestone_01_keyword(parsed_payload)
+    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
+        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
+        log.info("[/query-design] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
+        return await asyncio.to_thread(run_outer_u_design)
+    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
+        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
         log.info("[/query-design] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
         return await asyncio.to_thread(run_milestone_01_design)
 
@@ -282,11 +320,14 @@ async def query_design(
     predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
 
     attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
-    raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix)
+    raw = predictor.query_design(request.payload, attachments, system_prefix=system_prefix, thinking_budget=request.options.thinking_budget)
 
     if raw is not None:
         error_detail = _pop_error(raw)
         _strip_debug_fields(raw, request.options)
+        if error_detail:
+            log.error("[/query-design] predictor _error: %s", error_detail)
+            return fallback_query_design_response(detail=error_detail)
         validated = validate_query_design_response(raw)
         if validated is not None:
             return validated

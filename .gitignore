@@ -24,6 +24,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Local customer PDFs (AutoPlot). Do not commit.
+cad_prediction_service/local/
+
 # Runtime / pid files
 *.pid
 .uvicorn.pid

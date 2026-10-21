@@ -15,6 +15,10 @@ import fitz
 
 from app.pdf_agent.models import DrawingInputs
 
+class CalibrationInputError(ValueError):
+    """Engineering inputs need correction before geometry can be emitted."""
+
+
 Tool = Callable[..., dict[str, Any]]
 
 
@@ -215,9 +219,19 @@ def calibrate_tube_set(
     box = _source_view_box(tube_set, inspection)
     x0, y0, _x1, y1 = box
 
+    diameter_pdf = _number(tube_set.get("diameterPdf"))
+    if diameter_pdf is None:
+        diameter_pdf = _number(tube_set.get("diametro_estimado_pt"))
     factor = None
     factor_source = None
-    if inputs.scale_denominator and inputs.scale_denominator > 0:
+    if inputs.outer_diameter_m and diameter_pdf and diameter_pdf > 0:
+        factor = inputs.outer_diameter_m / diameter_pdf
+        factor_source = (
+            "likely_outer_diameter"
+            if inputs.used_likely_defaults
+            else "user_outer_diameter"
+        )
+    elif inputs.scale_denominator and inputs.scale_denominator > 0:
         factor = inputs.scale_denominator * 0.0254 / 72.0
         factor_source = "drawing_scale"
     calibration = tube_set.get("calibration")
@@ -225,14 +239,8 @@ def calibrate_tube_set(
         factor = _number(calibration.get("worldMetresPerPdfPoint"))
         factor_source = calibration.get("source") or "detector"
 
-    diameter_pdf = _number(tube_set.get("diameterPdf"))
-    if diameter_pdf is None:
-        diameter_pdf = _number(tube_set.get("diametro_estimado_pt"))
-    if factor is None and inputs.outer_diameter_m and diameter_pdf and diameter_pdf > 0:
-        factor = inputs.outer_diameter_m / diameter_pdf
-        factor_source = "user_outer_diameter"
     if factor is None or factor <= 0:
-        raise ValueError("Drawing scale or tube outer diameter is required")
+        raise CalibrationInputError("Drawing scale or tube outer diameter is required")
 
     world_tubes = []
     for index, tube in enumerate(tubes):
@@ -244,10 +252,13 @@ def calibrate_tube_set(
         if outer_diameter is None and tube_diameter_pdf:
             outer_diameter = tube_diameter_pdf * factor
         if outer_diameter is None or outer_diameter <= 0:
-            raise ValueError("Tube outer diameter is required")
+            raise CalibrationInputError("Tube outer diameter is required")
         thickness = inputs.wall_thickness_m
         if thickness is None or not 0 < thickness < outer_diameter / 2:
-            raise ValueError("A valid wall thickness is required")
+            raise CalibrationInputError(
+                f"Wall thickness must be positive and less than half the tube outside diameter "
+                f"({outer_diameter * 1000:g} mm). Check the view scale, outside diameter, and thickness."
+            )
         points_world = [
             {"x": (point[0] - x0) * factor, "y": (y1 - point[1]) * factor, "z": 0.0}
             for point in points
@@ -281,7 +292,12 @@ def calibrate_tube_set(
         "calibration": {
             "worldMetresPerPdfPoint": factor,
             "source": factor_source,
-            "scaleDenominator": inputs.scale_denominator,
+            "scaleDenominator": (
+                inputs.scale_denominator
+                if factor_source == "drawing_scale"
+                else None
+            ),
+            "usedLikelyDefaults": inputs.used_likely_defaults,
         },
         "tubes": world_tubes,
         "diagnostics": diagnostics,

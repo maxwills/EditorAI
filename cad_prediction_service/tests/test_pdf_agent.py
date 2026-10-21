@@ -82,6 +82,15 @@ def test_input_parser_uses_explicit_units():
     assert inputs.page == 2
 
 
+def test_input_parser_accepts_scale_and_bare_thickness_reply():
+    from app.pdf_agent.models import DrawingInputs
+
+    inputs = DrawingInputs()
+    apply_user_inputs("1:50, 6 mm", inputs)
+    assert inputs.scale_denominator == 50
+    assert inputs.wall_thickness_m == 0.006
+
+
 def test_pdf_request_requires_draw_intent_without_explicit_task():
     attachment = RawAttachment("drawing.pdf", _pdf_bytes())
     assert is_pdf_drawing_request({"taskContext": {"userText": "draw the tube coil"}}, [attachment])
@@ -96,6 +105,8 @@ def test_session_asks_then_resumes_without_reupload():
     )
     assert first["agentStatus"] == "needs_input"
     assert first["commands"][0]["command"] == "task.askUser"
+    assert "empty answer" in first["commands"][0]["params"]["question"]
+    assert "OD 63.5 mm" in first["commands"][0]["params"]["question"]
     session_id = first["agentSessionId"]
 
     second = agent.handle(_payload("scale 1:10 and thickness 6 mm", session_id), [])
@@ -108,6 +119,26 @@ def test_session_asks_then_resumes_without_reupload():
     assert tube_set["coordinateSpace"] == "world_m"
     assert tube_set["tubes"][0]["wallThickness"] == 0.006
     assert tube_set["tubes"][0]["pointsWorld"][0]["y"] > tube_set["tubes"][0]["pointsWorld"][1]["y"]
+
+
+def test_empty_answer_uses_recorded_likely_parameters():
+    agent = _agent()
+    first = agent.handle(
+        _payload("draw this tube"),
+        [RawAttachment("synthetic.pdf", _pdf_bytes())],
+    )
+    second = agent.handle(_payload("", first["agentSessionId"]), [])
+    assert second["agentStatus"] == "completed"
+    command = next(
+        item for item in second["commands"]
+        if item["command"] == "scene.createDetectedTubeSet"
+    )
+    tube_set = command["params"]["tubeSet"]
+    assert tube_set["calibration"]["source"] == "likely_outer_diameter"
+    assert tube_set["calibration"]["usedLikelyDefaults"] is True
+    assert tube_set["tubes"][0]["outerDiameter"] == 0.0635
+    assert tube_set["tubes"][0]["wallThickness"] == 0.006
+    assert any(item["code"] == "assumed_dimensions" for item in tube_set["diagnostics"])
 
 
 def test_invalid_detector_result_never_emits_geometry():
@@ -180,3 +211,25 @@ def test_non_pdf_query_keeps_normal_predictor_path():
     assert response.status_code == 200
     assert response.json()["commands"] == []
     assert response.json()["reasoning"] == "Mock predictor active."
+
+
+def test_inconsistent_dimensions_ask_for_correction_then_resume():
+    agent = _agent()
+    first = agent.handle(
+        _payload("draw; scale 1:1; thickness 6 mm"),
+        [RawAttachment("synthetic.pdf", _pdf_bytes())],
+    )
+    assert first["agentStatus"] == "needs_input"
+    question = first["commands"][0]["params"]["question"]
+    assert "less than half" in question
+    assert "outside diameter" in question
+    state = agent.store.get(first["agentSessionId"])
+    assert state is not None
+    assert state.diagnostics == []
+    second = agent.handle(_payload("OD 63.5 mm; thickness 6 mm", first["agentSessionId"]), [])
+    assert second["agentStatus"] == "completed"
+    assert sum(step["tool"] == "detect_tubes" for step in state.plan) == 1
+    tube_set = second["commands"][-1]["params"]["tubeSet"]
+    assert second["commands"][-1]["command"] == "scene.createDetectedTubeSet"
+    assert tube_set["calibration"]["source"] == "user_outer_diameter"
+    assert tube_set["calibration"]["worldMetresPerPdfPoint"] == 0.0635 / 5.0

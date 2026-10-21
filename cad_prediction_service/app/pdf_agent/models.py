@@ -15,6 +15,7 @@ class DrawingInputs:
     wall_thickness_m: float | None = None
     page: int | None = None
     view_box_pdf: list[float] | None = None
+    used_likely_defaults: bool = False
 
 
 @dataclass

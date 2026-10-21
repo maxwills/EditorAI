@@ -7,7 +7,7 @@ from typing import Any
 
 from app.pdf_agent.models import DrawingInputs, PdfDrawingState
 from app.pdf_agent.store import PdfSessionStore
-from app.pdf_agent.tools import ToolRegistry, default_registry
+from app.pdf_agent.tools import CalibrationInputError, ToolRegistry, default_registry
 from app.utils.attachment_utils import RawAttachment
 from app.utils.logging_utils import log
 
@@ -25,6 +25,7 @@ _THICKNESS = re.compile(
     r"(?:wall\s*thickness|thickness|espesor|pared)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm|m)?",
     re.IGNORECASE,
 )
+_BARE_MEASURE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(mm|cm|m)\b", re.IGNORECASE)
 _PAGE = re.compile(r"(?:page|p[aá]gina)\s*[:#]?\s*(\d+)", re.IGNORECASE)
 _BOX = re.compile(
     r"(?:box|crop|roi|recorte)\s*[:=]?\s*"
@@ -32,6 +33,8 @@ _BOX = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*[, ]+\s*(\d+(?:[.,]\d+)?)",
     re.IGNORECASE,
 )
+_LIKELY_OUTER_DIAMETER_M = 0.0635
+_LIKELY_WALL_THICKNESS_M = 0.006
 
 
 def _user_text(payload: dict[str, Any]) -> str:
@@ -80,22 +83,39 @@ def _to_metres(value: str, unit: str | None) -> float:
 
 def apply_user_inputs(text: str, inputs: DrawingInputs) -> None:
     """Parse explicit engineering values from one user turn."""
+    changed = False
     scale = _SCALE.search(text)
     if scale:
         inputs.scale_denominator = float(scale.group(1).replace(",", "."))
+        changed = True
     diameter = _OD.search(text)
     if diameter:
         inputs.outer_diameter_m = _to_metres(diameter.group(1), diameter.group(2))
+        changed = True
     thickness = _THICKNESS.search(text)
     if thickness:
         inputs.wall_thickness_m = _to_metres(thickness.group(1), thickness.group(2))
+        changed = True
+    elif text.strip():
+        # Accept concise replies such as `1:50, 6 mm` after the labelled prompt.
+        remaining = text
+        if diameter:
+            remaining = remaining[:diameter.start()] + remaining[diameter.end():]
+        bare = _BARE_MEASURE.findall(remaining)
+        if len(bare) == 1:
+            inputs.wall_thickness_m = _to_metres(*bare[0])
+            changed = True
     page = _PAGE.search(text)
     if page:
         inputs.page = int(page.group(1))
+        changed = True
     box = _BOX.search(text)
     if box:
         x, y, width, height = [float(value.replace(",", ".")) for value in box.groups()]
         inputs.view_box_pdf = [x, y, x + width, y + height]
+        changed = True
+    if changed:
+        inputs.used_likely_defaults = False
 
 
 def _todo(state: PdfDrawingState, status: str) -> list[dict[str, Any]]:
@@ -160,7 +180,10 @@ class PdfDrawingAgent:
         state = self._resolve_state(payload, attachments or [])
         if isinstance(state, dict):
             return state
-        apply_user_inputs(_user_text(payload), state.inputs)
+        user_text = _user_text(payload)
+        use_likely_defaults = bool(_session_id(payload)) and not user_text.strip()
+        if not use_likely_defaults:
+            apply_user_inputs(user_text, state.inputs)
         try:
             if state.inspection is None:
                 state.inspection = self._run(state, "inspect_pdf", pdf_bytes=state.pdf_bytes, filename=state.filename)
@@ -196,9 +219,11 @@ class PdfDrawingAgent:
                         "message": f"{validation['incompleteCount']} detected paths may be incomplete",
                     })
 
+            if use_likely_defaults:
+                self._apply_likely_parameters(state)
             missing = self._missing_inputs(state)
             if missing:
-                question = self._question(missing)
+                question = self._question(state, missing)
                 return _response(
                     state,
                     "needs_input",
@@ -212,6 +237,15 @@ class PdfDrawingAgent:
                 tube_set=state.tube_set,
                 inspection=state.inspection,
                 inputs=state.inputs,
+            )
+            existing_codes = {
+                item.get("code")
+                for item in calibrated["diagnostics"]
+                if isinstance(item, dict)
+            }
+            calibrated["diagnostics"].extend(
+                item for item in state.diagnostics
+                if item.get("code") not in existing_codes
             )
             commands: list[dict[str, Any]] = []
             if "render_reference_image" in self.tools.names:
@@ -234,10 +268,19 @@ class PdfDrawingAgent:
                 state,
                 "completed",
                 commands,
-                f"Detected and validated {len(calibrated['tubes'])} tube paths; dimensions are in world metres.",
+                f"Detected and validated {len(calibrated['tubes'])} tube paths; dimensions are in world metres."
+                + (" Likely boiler-tube dimensions were assumed and recorded." if state.inputs.used_likely_defaults else ""),
             )
             self.store.delete(state.session_id)
             return response
+        except CalibrationInputError as exc:
+            # Keep the uploaded PDF and detection so a corrected answer can resume.
+            question = self._question(state, ["invalid_values"], prefix=str(exc))
+            return _response(
+                state, "needs_input",
+                [{"command": "task.askUser", "params": {"question": question}}],
+                "The supplied dimensions could not be calibrated; please correct them.",
+            )
         except Exception as exc:
             log.exception("[pdf-agent] session %s failed", state.session_id)
             state.diagnostics.append({
@@ -310,10 +353,66 @@ class PdfDrawingAgent:
         return missing
 
     @staticmethod
-    def _question(missing: list[str]) -> str:
+    def _likely_parameters(state: PdfDrawingState) -> tuple[float, float]:
+        """Choose conservative boiler-tube dimensions from available evidence."""
+        diameter = state.inputs.outer_diameter_m
+        diameter_pdf = (
+            state.tube_set.get("diameterPdf")
+            if isinstance(state.tube_set, dict)
+            else None
+        )
+        if diameter is None and state.inputs.scale_denominator and diameter_pdf:
+            inferred = float(diameter_pdf) * state.inputs.scale_denominator * 0.0254 / 72.0
+            if 0.02 <= inferred <= 0.15:
+                diameter = inferred
+        if diameter is None or not 0.02 <= diameter <= 0.15:
+            diameter = _LIKELY_OUTER_DIAMETER_M
+        thickness = state.inputs.wall_thickness_m
+        if thickness is None or not 0 < thickness < diameter / 2:
+            likely_mm = max(1.0, round(diameter * 1000 * 0.1))
+            thickness = min(likely_mm / 1000.0, diameter * 0.2)
+        return diameter, thickness
+
+    def _apply_likely_parameters(self, state: PdfDrawingState) -> None:
+        """Apply and record defaults selected by an empty clarification answer."""
+        diameter, thickness = self._likely_parameters(state)
+        state.inputs.outer_diameter_m = diameter
+        state.inputs.wall_thickness_m = thickness
+        state.inputs.used_likely_defaults = True
+        state.diagnostics = [
+            item for item in state.diagnostics
+            if item.get("code") != "assumed_dimensions"
+        ]
+        state.diagnostics.append({
+            "severity": "warning",
+            "code": "assumed_dimensions",
+            "message": (
+                f"Used likely boiler-tube dimensions: OD {diameter * 1000:g} mm, "
+                f"wall thickness {thickness * 1000:g} mm."
+            ),
+        })
+
+    def _question(
+        self,
+        state: PdfDrawingState,
+        missing: list[str],
+        prefix: str | None = None,
+    ) -> str:
         requests = []
         if "scale_or_outer_diameter" in missing:
             requests.append("the view scale (for example `scale 1:10`) or tube outside diameter (`OD 63.5 mm`)")
         if "wall_thickness" in missing:
             requests.append("the tube wall thickness (for example `thickness 6 mm`)")
-        return "Please provide " + " and ".join(requests) + "."
+        if "invalid_values" in missing:
+            requests.append(
+                "corrected values with labels and units, for example "
+                "`OD 63.5 mm; thickness 6 mm`"
+            )
+        diameter, thickness = self._likely_parameters(state)
+        request_text = "Please provide " + " and ".join(requests) + "."
+        default_text = (
+            " Send an empty answer to use likely boiler-tube parameters: "
+            f"OD {diameter * 1000:g} mm and wall thickness {thickness * 1000:g} mm. "
+            "The assumption will be recorded in the model provenance."
+        )
+        return (f"{prefix} " if prefix else "") + request_text + default_text

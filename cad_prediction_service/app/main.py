@@ -1,23 +1,14 @@
 import asyncio
+import hashlib
 import json
 import re
 import time
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.autoplot_regions import AutoPlotRegionsError, run as run_autoplot_regions
-from app.milestone_01_mock import (
-    MILESTONE_01_KEYWORD,
-    OUTER_U_KEYWORD,
-    keyword_present as _keyword_present,
-    run_milestone_01,
-    run_milestone_01_design,
-    run_outer_u,
-    run_outer_u_design,
-    strip_keyword as _strip_keyword,
-)
+from app.pdf_agent import PdfDrawingAgent
 from app.predictor.base import PredictorAdapter
 from app.predictor.claude_predictor import CLAUDE_MODEL, ClaudePredictor
 from app.predictor.mock_predictor import MockPredictor
@@ -31,6 +22,7 @@ from app.utils.logging_utils import log
 app = FastAPI(title="CAD Prediction Service")
 
 _mock = MockPredictor()
+_pdf_agent = PdfDrawingAgent()
 
 
 # ── Logging middleware ──────────────────────────────────────────────────────────
@@ -97,7 +89,7 @@ def _extract_multipart_text(raw: str, max_field_chars: int = 2000) -> str:
         return raw[:max_field_chars]
     lines = []
     for name, value in parts:
-        if name == "file":
+        if name in {"file", "files"}:
             lines.append("file=<binary>")
         else:
             v = value.strip()
@@ -105,21 +97,48 @@ def _extract_multipart_text(raw: str, max_field_chars: int = 2000) -> str:
     return "  ".join(lines)
 
 
+def _agent_response_summary(resp_body: bytes) -> str:
+    """Summarize agent output without logging geometry or user content."""
+    try:
+        body = json.loads(resp_body.decode("utf-8"))
+    except Exception:
+        return f"bytes={len(resp_body)}"
+    commands = body.get("commands") if isinstance(body, dict) else []
+    names = [
+        item.get("command")
+        for item in commands or []
+        if isinstance(item, dict) and isinstance(item.get("command"), str)
+    ]
+    return _summarise({
+        "agentStatus": body.get("agentStatus") if isinstance(body, dict) else None,
+        "commands": names,
+        "todoCount": len(body.get("todo") or []) if isinstance(body, dict) else 0,
+        "diagnosticCount": len(body.get("diagnostics") or []) if isinstance(body, dict) else 0,
+    })
+
+
 def _log_pair(method: str, path: str, status: int,
               req_body: bytes, resp_body: bytes, elapsed_ms: float) -> None:
-    try:
-        req_preview = _summarise(json.loads(req_body.decode("utf-8")))
-    except Exception:
-        req_preview = _extract_multipart_text(req_body.decode("utf-8", errors="replace"))
+    if path in {"/query", "/query-design", "/autoplot"}:
+        digest = hashlib.sha256(req_body).hexdigest()[:16]
+        req_preview = f"multipart bytes={len(req_body)} sha256={digest}"
+    else:
+        try:
+            req_preview = _summarise(json.loads(req_body.decode("utf-8")))
+        except Exception:
+            req_preview = _extract_multipart_text(req_body.decode("utf-8", errors="replace"))
 
-    try:
-        resp_preview = _summarise(json.loads(resp_body.decode("utf-8")))
-    except Exception:
-        resp_preview = resp_body.decode("utf-8", errors="replace")[:3000]
+    if path in {"/query", "/query-design", "/autoplot"}:
+        resp_preview = _agent_response_summary(resp_body)
+    else:
+        try:
+            resp_preview = _summarise(json.loads(resp_body.decode("utf-8")))
+        except Exception:
+            resp_preview = resp_body.decode("utf-8", errors="replace")[:3000]
 
-    log.info("→ %s %s  %s", method, path, req_preview)
+    log.info("REQUEST %s %s  %s", method, path, req_preview)
     level = log.error if status >= 400 else log.info
-    level("← %s %s  status=%d  elapsed=%.0fms  %s", method, path, status, elapsed_ms, resp_preview)
+    level("RESPONSE %s %s  status=%d  elapsed=%.0fms  %s", method, path, status, elapsed_ms, resp_preview)
 
 
 def _parse_form_json(field_name: str, value: str) -> Any:
@@ -185,14 +204,6 @@ def _check_dev_mode(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return DEV_MODE_SYSTEM_PREFIX, payload
 
 
-def _try_parse_payload(payload: str) -> Any | None:
-    """Best-effort JSON parse for keyword scanning; None if invalid."""
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-
-
 def _pop_error(raw: dict[str, Any]) -> str | None:
     """Extract the _error sentinel (if any) from a predictor result dict."""
     return raw.pop("_error", None)
@@ -209,16 +220,22 @@ def _strip_debug_fields(raw: dict[str, Any], options) -> None:
 
 @app.post("/autoplot")
 async def autoplot(
-    text: str = Form(..., description="Required text. Not interpreted."),
-    file: Annotated[UploadFile | None, File(description="Optional PDF. Ignored; the server uses its local copy.")] = None,
+    text: str = Form(..., description="Tube drawing request."),
+    file: Annotated[UploadFile | None, File(description="PDF drawing to process.")] = None,
 ) -> dict[str, Any]:
-    """AutoPlot entry. Later versions keep this path. `file` is accepted and ignored."""
-    del file
-    try:
-        return await asyncio.to_thread(run_autoplot_regions, text)
-    except AutoPlotRegionsError as exc:
-        log.error("[/autoplot] %s", exc.detail)
-        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+    """Compatibility entry routed through the same uploaded-PDF agent as /query."""
+    if file is None:
+        raise HTTPException(status_code=422, detail="Attach a PDF drawing")
+    attachment = RawAttachment(filename=file.filename, data=await file.read())
+    payload = {
+        "taskContext": {
+            "microUT": {"id": "draw_tubes_from_pdf"},
+            "userText": text,
+            "mode": "pdf_tube_drawing",
+        }
+    }
+    response = await asyncio.to_thread(_pdf_agent.handle, payload, [attachment])
+    return response or {"commands": [], "reasoning": "PDF drawing request was not handled"}
 
 
 
@@ -256,25 +273,15 @@ async def query(
     files: Annotated[list[UploadFile], File(description="Optional files to attach (image, PDF, Excel, DXF, etc.).")] = [],
 ) -> QueryResponse:
     """CAD modelling assistant endpoint."""
-    parsed_payload = _try_parse_payload(payload)
-    #: OUTER_U_MOCK wins over MILESTONE_01_MOCK when both appear (n=1 nest2_1892_3270, not the short 1:10 n=20).
-    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
-        #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
-        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
-        log.info("[/query] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
-        return await asyncio.to_thread(run_outer_u)
-    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
-        #: Skip _get_predictor entirely — not Claude, not Ollama, not MockPredictor.
-        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
-        log.info("[/query] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
-        return await asyncio.to_thread(run_milestone_01)
-
     parsed_payload = _parse_form_json("payload", payload)
     system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))
-    predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
-
     attachments = [RawAttachment(filename=f.filename, data=await f.read()) for f in files] or None
+    pdf_response = await asyncio.to_thread(_pdf_agent.handle, request.payload, attachments)
+    if pdf_response is not None:
+        return QueryResponse(**pdf_response)
+
+    predictor, _, _ = _get_predictor(request.options.provider, request.options.model)
     raw = predictor.query(request.payload, attachments, system_prefix=system_prefix, thinking_budget=request.options.thinking_budget)
 
     if raw is not None:
@@ -304,16 +311,6 @@ async def query_design(
     Same prompt as /query but prefixed with design-analysis instructions.
     Commands are not dispatched; the LLM analyses gaps and produces desiredCommands / designFeedback.
     """
-    parsed_payload = _try_parse_payload(payload)
-    if _keyword_present(payload, options, parsed_payload, OUTER_U_KEYWORD):
-        parsed_payload = _strip_keyword(parsed_payload, OUTER_U_KEYWORD)
-        log.info("[/query-design] OUTER_U_MOCK detected — skipping LLM, running emit-outer-u --one CLI.")
-        return await asyncio.to_thread(run_outer_u_design)
-    if _keyword_present(payload, options, parsed_payload, MILESTONE_01_KEYWORD):
-        parsed_payload = _strip_keyword(parsed_payload, MILESTONE_01_KEYWORD)
-        log.info("[/query-design] MILESTONE_01_MOCK detected — skipping LLM, running emit CLI.")
-        return await asyncio.to_thread(run_milestone_01_design)
-
     parsed_payload = _parse_form_json("payload", payload)
     system_prefix, parsed_payload = _check_dev_mode(parsed_payload)
     request = QueryRequest(payload=parsed_payload, options=Options(**_parse_form_json("options", options)))

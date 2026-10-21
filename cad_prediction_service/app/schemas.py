@@ -1,9 +1,16 @@
 from typing import Any, Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 ProviderName = Literal["mock", "ollama", "claude"]
 #: "default" is the placeholder for ollama until proper model naming is added.
-ModelName = Literal["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "default"]
+ModelName = Literal[
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "default",
+]
 
 
 class Options(BaseModel):
@@ -94,9 +101,13 @@ class QueryRequest(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    todo: list[Any] = []
-    commands: list[Any] = []
+    todo: list[Any] = Field(default_factory=list)
+    commands: list[Any] = Field(default_factory=list)
     reasoning: Optional[str] = None
+    #: Resumable server-side tool session for task.askUser turns.
+    agentSessionId: Optional[str] = None
+    agentStatus: Optional[str] = None
+    diagnostics: list[Any] = Field(default_factory=list)
     #: Raw LLM output — only populated when options.include_full_answer is True.
     llm_raw_response: Optional[str] = None
     #: Prompt sent to the LLM — only populated when options.include_prompt is True.
@@ -107,6 +118,6 @@ class QueryResponse(BaseModel):
 
 class QueryDesignResponse(QueryResponse):
     """Extended response for /query-design — includes design analysis fields."""
-    desiredCommands: list[Any] = []
-    designFeedback: list[Any] = []
+    desiredCommands: list[Any] = Field(default_factory=list)
+    designFeedback: list[Any] = Field(default_factory=list)
     notes: Optional[str] = None

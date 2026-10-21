@@ -31,3 +31,4 @@ cad_prediction_service/local/
 *.pid
 .uvicorn.pid
 nul
+cad_prediction_service/logs/

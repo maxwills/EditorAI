@@ -10,8 +10,15 @@ fi
 PID=$(cat "$PID_FILE")
 if kill -0 "$PID" 2>/dev/null; then
     echo "Stopping uvicorn (PID $PID)..."
-    # SIGTERM works on Windows/Git Bash where SIGINT does not.
-    kill -SIGTERM "$PID" 2>/dev/null || taskkill //F //PID "$PID" 2>/dev/null
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Uvicorn reload spawns a worker; Windows must stop the full tree.
+            taskkill //PID "$PID" //T //F >/dev/null 2>&1
+            ;;
+        *)
+            kill -SIGTERM "$PID" 2>/dev/null
+            ;;
+    esac
     echo "Done."
 else
     echo "Process $PID is not running."

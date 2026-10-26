@@ -52,3 +52,12 @@ def test_cur1000650_emits_editable_tube_set():
     assert tube_set["calibration"]["usedLikelyDefaults"] is True
     assert all(tube["pointsWorld"] for tube in tube_set["tubes"])
     assert all(tube["outerDiameter"] == pytest.approx(0.0635) for tube in tube_set["tubes"])
+    assert sorted(len(tube["pointsWorld"]) for tube in tube_set["tubes"]) == [
+        20, 20, 24, 24,
+    ]
+    assert all(
+        "bendRadius" not in tube["pointsWorld"][0]
+        and "bendRadius" not in tube["pointsWorld"][-1]
+        and all("bendRadius" in point for point in tube["pointsWorld"][1:-1])
+        for tube in tube_set["tubes"]
+    )

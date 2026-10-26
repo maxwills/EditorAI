@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.main import app
+from app.pdf_agent.models import DrawingInputs
 from app.pdf_agent.session import PdfDrawingAgent, apply_user_inputs, is_pdf_drawing_request
 from app.pdf_agent.tools import (
     ToolRegistry,
@@ -71,9 +72,32 @@ def test_inspection_reports_hash_page_and_vectors():
     assert result["pages"][0]["hasVectorGeometry"] is True
 
 
-def test_input_parser_uses_explicit_units():
-    from app.pdf_agent.models import DrawingInputs
+def test_calibration_applies_radius_only_to_true_control_corners():
+    detected = _detected()
+    detected["tubes"][0]["pointsPdf"] = [
+        [20, 20],
+        [20, 80],
+        [20, 140],
+        [120, 140],
+        [120, 20],
+    ]
+    detected["tubes"][0]["bendRadiusPdf"] = 20
+    calibrated = calibrate_tube_set(
+        detected,
+        {"sha256": "0" * 64, "filename": "synthetic.pdf"},
+        DrawingInputs(outer_diameter_m=0.05, wall_thickness_m=0.005),
+    )
 
+    points = calibrated["tubes"][0]["pointsWorld"]
+    assert len(points) == 5
+    assert "bendRadius" not in points[0]
+    assert "bendRadius" not in points[1]
+    assert points[2]["bendRadius"] == 0.2
+    assert points[3]["bendRadius"] == 0.2
+    assert "bendRadius" not in points[4]
+
+
+def test_input_parser_uses_explicit_units():
     inputs = DrawingInputs()
     apply_user_inputs("scale 1:10, OD 63.5 mm, wall thickness 6 mm, page 2", inputs)
     assert inputs.scale_denominator == 10
@@ -83,8 +107,6 @@ def test_input_parser_uses_explicit_units():
 
 
 def test_input_parser_accepts_scale_and_bare_thickness_reply():
-    from app.pdf_agent.models import DrawingInputs
-
     inputs = DrawingInputs()
     apply_user_inputs("1:50, 6 mm", inputs)
     assert inputs.scale_denominator == 50

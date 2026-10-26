@@ -121,7 +121,11 @@ def detect_tubes(
 ) -> dict[str, Any]:
     """Run detecta_tubos and return its normalized TubeSet dictionary."""
     detector = _load_detector_module()
-    kwargs: dict[str, Any] = {"filename": filename, "strategy": strategy}
+    kwargs: dict[str, Any] = {
+        "filename": filename,
+        "strategy": strategy,
+        "tube_v2_controls": True,
+    }
     if page is not None:
         kwargs["page"] = page
     if view_box_pdf is not None:
@@ -159,6 +163,29 @@ def _points_pdf(tube: dict[str, Any]) -> list[list[float]]:
         if x is not None and y is not None:
             points.append([x, y])
     return points
+
+
+def _is_bend_point(points: list[list[float]], index: int) -> bool:
+    """Return whether one interior control changes path direction."""
+    if index <= 0 or index >= len(points) - 1:
+        return False
+    incoming = (
+        points[index][0] - points[index - 1][0],
+        points[index][1] - points[index - 1][1],
+    )
+    outgoing = (
+        points[index + 1][0] - points[index][0],
+        points[index + 1][1] - points[index][1],
+    )
+    incoming_length = math.hypot(*incoming)
+    outgoing_length = math.hypot(*outgoing)
+    if incoming_length <= 1e-9 or outgoing_length <= 1e-9:
+        return False
+    cosine = (
+        incoming[0] * outgoing[0] + incoming[1] * outgoing[1]
+    ) / (incoming_length * outgoing_length)
+    angle = math.acos(max(-1.0, min(1.0, cosine)))
+    return 0.04 < angle < math.pi - 0.04
 
 
 def validate_detected_tube_set(tube_set: dict[str, Any]) -> dict[str, Any]:
@@ -266,8 +293,9 @@ def calibrate_tube_set(
         radius_pdf = _number(tube.get("bendRadiusPdf"))
         bend_radius = radius_pdf * factor if radius_pdf and radius_pdf > 0 else None
         if bend_radius:
-            for point in points_world[1:-1]:
-                point["bendRadius"] = bend_radius
+            for point_index in range(1, len(points_world) - 1):
+                if _is_bend_point(points, point_index):
+                    points_world[point_index]["bendRadius"] = bend_radius
         world_tubes.append({
             "id": str(tube.get("id") or tube.get("name") or f"tube_{index + 1}"),
             "pointsWorld": points_world,

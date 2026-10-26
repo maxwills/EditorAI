@@ -99,6 +99,15 @@ Interactive docs: `http://localhost:8001/docs`
 
 ---
 
+## PDF Smart Draw path representation
+
+The PDF agent calls `detecta_tubos` with `tube_v2_controls=True`. Detection still
+uses the original sampled centerlines, but the emitted `pointsPdf` are sparse
+TubeV2 controls with U-return inflections preserved. Direct detector consumers
+that omit the flag continue to receive sampled centerlines.
+
+---
+
 ## Example requests
 
 ### Mock predictor (no LLM)
